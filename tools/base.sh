@@ -12,7 +12,7 @@
 LOCALIP="localhost"
 
 # 镜像版本
-IMAGETAG="1.26.15"
+IMAGETAG="1.23.17"
 
 # 当前路径, $(pwd) 可以更改路径
 PKGPWD=$(pwd)
