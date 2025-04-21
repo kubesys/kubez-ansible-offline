@@ -622,7 +622,7 @@ function setup_univirt_inventory() {
     if [ ! -d "${target_dir}" ]; then
         log error "UniVirt 目录不存在: ${target_dir}"
         exit 1
-    }
+    fi
     
     # 如果目标文件存在，直接删除
     if [ -f "${target_dir}/${inventory_file}" ]; then
@@ -926,7 +926,7 @@ function check_kubernetes_ready() {
     if ! kubectl get nodes &> /dev/null; then
         log error "无法连接到 Kubernetes 集群，请确保集群已正常运行"
         exit 1
-    }
+    fi
     
     log info "Kubernetes 集群检查通过"
     return 0
