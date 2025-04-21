@@ -274,9 +274,66 @@ function wait_nexus_url() {
     done
 }
 
-# 处理镜像和RPM包
+# 添加安装和配置 Docker 的函数
+function setup_docker() {
+    log info "检查并安装 Docker..."
+    
+    # 检查 Docker 是否已安装
+    if command -v docker >/dev/null 2>&1; then
+        log info "Docker 已安装"
+    else
+        log info "开始安装 Docker..."
+        yum install -y docker || {
+            log error "Docker 安装失败"
+            exit 1
+        }
+    fi
+    
+    # 检查 Docker 服务状态并启动
+    if systemctl is-active docker >/dev/null 2>&1; then
+        log info "Docker 服务已运行"
+    else
+        log info "启动 Docker 服务..."
+        systemctl start docker || {
+            log error "Docker 服务启动失败"
+            exit 1
+        }
+    fi
+    
+    # 设置 Docker 开机自启
+    if systemctl is-enabled docker >/dev/null 2>&1; then
+        log info "Docker 已设置开机自启"
+    else
+        log info "设置 Docker 开机自启..."
+        systemctl enable docker || {
+            log error "设置 Docker 开机自启失败"
+            exit 1
+        }
+    fi
+    
+    # 等待 Docker 服务完全启动
+    local max_retries=30
+    local retry_count=0
+    while [ $retry_count -lt $max_retries ]; do
+        if docker info >/dev/null 2>&1; then
+            log info "Docker 服务已就绪"
+            return 0
+        fi
+        log info "等待 Docker 服务就绪... (${retry_count}/${max_retries})"
+        sleep 2
+        ((retry_count++))
+    done
+    
+    log error "Docker 服务启动超时"
+    exit 1
+}
+
+# 修改 process_materials 函数，在加载镜像前添加 Docker 安装和启动
 function process_materials() {
     cd ${PKGPWD}
+    
+    # 安装和启动 Docker
+    setup_docker
     
     # 处理镜像
     if [ ! -d "allimagedownload" ]; then
@@ -306,6 +363,36 @@ function process_materials() {
         cd "image" && sh load.sh || { log error "加载本地镜像失败"; exit 1; }
         cd ${PKGPWD}
     fi
+}
+
+# 可选：添加 Docker 配置优化（如果需要）
+function optimize_docker() {
+    log info "优化 Docker 配置..."
+    
+    # 创建 Docker 配置目录
+    mkdir -p /etc/docker
+    
+    # 配置 Docker daemon
+    cat > /etc/docker/daemon.json <<EOF
+{
+  "exec-opts": ["native.cgroupdriver=systemd"],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "3"
+  },
+  "storage-driver": "overlay2",
+  "storage-opts": [
+    "overlay2.override_kernel_check=true"
+  ]
+}
+EOF
+    
+    # 重新加载 Docker 配置
+    systemctl daemon-reload
+    systemctl restart docker
+    
+    log info "Docker 配置优化完成"
 }
 
 # 配置YUM仓库
