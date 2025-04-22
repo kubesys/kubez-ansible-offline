@@ -1,5 +1,21 @@
 #!/bin/bash
 
+# Copyright (2024, ) Institute of Software, Chinese Academy of Sciences
+#
+# @author: liujiexin@otcaix.iscas.ac.cn
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 # 设置基本工作目录
 export PKGPWD=$(pwd)
 # 引入 kubez-ansible 和 base.sh
@@ -982,6 +998,7 @@ function main() {
                 "all")
                     log info "开始完整安装..."
                     init_env
+                    check_ports_availability
                     cleanup_old_data
                     check_files
                     install_nexus
@@ -1001,8 +1018,8 @@ function main() {
                 "harbor")
                     log info "开始安装 Harbor..."
                     init_env
-                    cleanup_old_data
                     check_ports_availability
+                    cleanup_old_data
                     install_harbor
                     log info "Harbor 安装完成"
                     ;;
