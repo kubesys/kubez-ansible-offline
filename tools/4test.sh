@@ -89,9 +89,53 @@ function init_env() {
     
 }
 
-# 检查端口是否被占用
+# 添加关闭防火墙的函数
+function disable_firewall() {
+    log info "检查并关闭防火墙..."
+    
+    # 检查 firewalld 是否安装
+    if ! command -v firewall-cmd >/dev/null 2>&1; then
+        log info "firewalld 未安装，无需关闭"
+        return 0
+    fi
+    
+    # 检查 firewalld 服务状态
+    if systemctl is-active firewalld >/dev/null 2>&1; then
+        log info "停止 firewalld 服务..."
+        if ! systemctl stop firewalld; then
+            log error "停止 firewalld 服务失败"
+            exit 1
+        fi
+        
+        log info "禁用 firewalld 开机自启..."
+        if ! systemctl disable firewalld; then
+            log error "禁用 firewalld 开机自启失败"
+            exit 1
+        fi
+        
+        log info "firewalld 服务已停止并禁用"
+    else
+        log info "firewalld 服务未运行"
+        
+        # 确保 firewalld 开机自启被禁用
+        if systemctl is-enabled firewalld >/dev/null 2>&1; then
+            log info "禁用 firewalld 开机自启..."
+            if ! systemctl disable firewalld; then
+                log error "禁用 firewalld 开机自启失败"
+                exit 1
+            fi
+        fi
+    fi
+    
+    return 0
+}
+
+# 修改 check_ports_availability 函数
 function check_ports_availability() {
     log info "检查关键端口是否被占用..."
+    
+    # 关闭防火墙
+    disable_firewall
     
     # 检查58000端口（Nexus仓库）
     if netstat -tuln | grep -q ":58000 "; then
@@ -941,8 +985,8 @@ function main() {
                     cleanup_old_data
                     check_files
                     install_nexus
-                    process_materials
                     setup_yum_repo
+                    process_materials
                     install_kubez_ansible
                     setup_kubernetes
                     install_kube_ovn
