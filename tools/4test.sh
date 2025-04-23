@@ -294,13 +294,11 @@ function check_files() {
 function install_nexus() {
     check_memory
     
-    if curl ${IP_ADDRESS}:58000 >/dev/null 2>&1; then
-        log info "nexus服务已经安装"
-        return 0
-    fi
-
-    if [ ! -d "/data/nexus_local" ]; then
-        log info "准备开始安装nexus"
+    # 检查是否已安装
+    if [ -d "/data/nexus_local" ]; then
+        log info "Nexus 目录已存在"
+    else
+        log info "准备开始安装 Nexus"
         mkdir -p /data
         tar -zxvf nexus.tar.gz -C /data || { log error "解压nexus.tar.gz失败"; exit 1; }
     fi
@@ -312,26 +310,99 @@ function install_nexus() {
         echo 'cd /data/nexus_local && bash nexus.sh start' >> /etc/rc.d/rc.local
     fi
 
-    wait_nexus_url
+    # 等待 Nexus 服务启动
+    wait_nexus_service
 }
 
-# 等待nexus服务就绪
-function wait_nexus_url() {
+# 添加等待 Nexus 服务启动的函数
+function wait_nexus_service() {
+    log info "等待 Nexus 服务启动..."
     local retries=0
-    while true; do
-        HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" ${RPMURL})
-        if [ "$HTTP_STATUS" -eq 200 ]; then
-            log info "rpm仓库已经正常"
+    local max_retries=60  # 5分钟超时
+
+    while [ $retries -lt $max_retries ]; do
+        if curl -s -m 5 ${IP_ADDRESS}:58000 > /dev/null 2>&1; then
+            log info "Nexus 服务已启动"
             return 0
         fi
         log info "rpm仓库正在启动中，请稍后"
         sleep 5
         ((retries++))
-        if [ $retries -ge 200 ]; then
-            log error "rpm启动失败,请检查nexus相关物料是否下载正确"
-            exit 1
-        fi
     done
+
+    log error "Nexus 服务启动超时"
+    exit 1
+}
+
+# 修改 wait_nexus_url 函数，专门用于检查 RPM 仓库
+function wait_nexus_url() {
+    log info "检查 RPM 仓库状态..."
+    local retries=0
+    local max_retries=200
+
+    while [ $retries -lt $max_retries ]; do
+        HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" ${RPMURL})
+        if [ "$HTTP_STATUS" -eq 200 ]; then
+            log info "RPM 仓库已经正常"
+            return 0
+        fi
+        log info "等待 RPM 仓库就绪中...(${retries}/${max_retries})"
+        sleep 5
+        ((retries++))
+    done
+    
+    log error "Docker 服务启动超时"
+    exit 1
+}
+
+# 修改 process_materials 函数，在加载镜像前添加 Docker 安装和启动
+function process_materials() {
+    cd ${PKGPWD}
+    
+    
+    # 处理镜像
+    if [ ! -d "allimagedownload" ]; then
+        log info "开始解压远程镜像文件"
+        tar -zxvf k8s-centos7-v${KUBE_VERSION}_images.tar.gz || { log error "解压镜像文件失败"; exit 1; }
+    fi
+
+    # 解压RPM包
+    if [ ! -d "localrepo" ]; then
+        log info "开始解压RPM包"
+        tar -zxvf k8s-centos7-v${KUBE_VERSION}-rpm.tar.gz || { log error "解压RPM包失败"; exit 1; }
+    fi
+
+    # 解压本地镜像文件
+    if [ ! -d "image" ]; then
+        log info "开始解压本地镜像文件"
+        tar -zxvf image.tar.gz || { log error "解压镜像文件失败"; exit 1; }
+    fi
+
+    # 2. 上传远程镜像和RPM包
+    log info "上传远程镜像和RPM包..."
+    cd allimagedownload && sh load_image.sh ${IP_ADDRESS} || { log error "加载远程镜像失败"; exit 1; }
+    cd ../localrepo && sh push_rpm.sh ${IP_ADDRESS} || { log error "推送RPM包失败"; exit 1; }
+    cd ${PKGPWD}
+
+    # 3. 检查 RPM 仓库状态
+    wait_nexus_url
+
+    # 4. 配置YUM源
+    log info "配置YUM源..."
+    setup_yum_repo || { log error "配置YUM源失败"; exit 1; }
+
+    # 4. 安装和配置Docker
+    log info "安装和配置Docker..."
+    setup_docker || { log error "安装和配置Docker失败"; exit 1; }
+
+    # 5. 最后加载本地镜像
+    log info "加载本地镜像..."
+    if [ -d "image" ] && [ -f "image/load.sh" ]; then
+        cd "image" && sh load.sh || { log error "加载本地镜像失败"; exit 1; }
+        cd ${PKGPWD}
+    fi
+
+    log info "所有材料处理完成"
 }
 
 # 添加安装和配置 Docker 的函数
@@ -386,85 +457,6 @@ function setup_docker() {
     
     log error "Docker 服务启动超时"
     exit 1
-}
-
-# 修改 process_materials 函数，调整执行顺序
-function process_materials() {
-    cd ${PKGPWD}
-    
-    # 1. 首先解压所有需要的文件
-    log info "解压所需文件..."
-    
-    # 解压远程镜像文件
-    if [ ! -d "allimagedownload" ]; then
-        log info "开始解压远程镜像文件"
-        tar -zxvf k8s-centos7-v${KUBE_VERSION}_images.tar.gz || { log error "解压镜像文件失败"; exit 1; }
-    fi
-
-    # 解压RPM包
-    if [ ! -d "localrepo" ]; then
-        log info "开始解压RPM包"
-        tar -zxvf k8s-centos7-v${KUBE_VERSION}-rpm.tar.gz || { log error "解压RPM包失败"; exit 1; }
-    fi
-
-    # 解压本地镜像文件
-    if [ ! -d "image" ]; then
-        log info "开始解压本地镜像文件"
-        tar -zxvf image.tar.gz || { log error "解压镜像文件失败"; exit 1; }
-    fi
-
-    # 2. 上传远程镜像和RPM包
-    log info "上传远程镜像和RPM包..."
-    cd allimagedownload && sh load_image.sh ${IP_ADDRESS} || { log error "加载远程镜像失败"; exit 1; }
-    cd ../localrepo && sh push_rpm.sh ${IP_ADDRESS} || { log error "推送RPM包失败"; exit 1; }
-    cd ${PKGPWD}
-
-    # 3. 配置YUM源
-    log info "配置YUM源..."
-    setup_yum_repo || { log error "配置YUM源失败"; exit 1; }
-
-    # 4. 安装和配置Docker
-    log info "安装和配置Docker..."
-    setup_docker || { log error "安装和配置Docker失败"; exit 1; }
-
-    # 5. 最后加载本地镜像
-    log info "加载本地镜像..."
-    if [ -d "image" ] && [ -f "image/load.sh" ]; then
-        cd "image" && sh load.sh || { log error "加载本地镜像失败"; exit 1; }
-        cd ${PKGPWD}
-    fi
-
-    log info "所有材料处理完成"
-}
-
-# 可选：添加 Docker 配置优化（如果需要）
-function optimize_docker() {
-    log info "优化 Docker 配置..."
-    
-    # 创建 Docker 配置目录
-    mkdir -p /etc/docker
-    
-    # 配置 Docker daemon
-    cat > /etc/docker/daemon.json <<EOF
-{
-  "exec-opts": ["native.cgroupdriver=systemd"],
-  "log-driver": "json-file",
-  "log-opts": {
-    "max-size": "100m",
-    "max-file": "3"
-  },
-  "storage-driver": "overlay2",
-  "storage-opts": [
-    "overlay2.override_kernel_check=true"
-  ]
-}
-EOF
-    
-    # 重新加载 Docker 配置
-    systemctl daemon-reload
-    systemctl restart docker
-    
-    log info "Docker 配置优化完成"
 }
 
 # 配置YUM仓库
