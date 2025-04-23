@@ -74,7 +74,7 @@ function set_base_dir() {
 # 在 init_env 函数之前添加 ALL_IN_ONE 变量的设置
 
 
-# 添加检查系统版本的函数
+# 修改检查系统版本的函数
 function check_system_version() {
     log info "检查系统版本..."
     
@@ -87,16 +87,39 @@ function check_system_version() {
     # 获取完整的系统版本信息
     local full_version=$(cat /etc/centos-release)
     
-    # 检查是否为 CentOS 7.9
-    if ! echo "$full_version" | grep -q "CentOS Linux release 7.9"; then
-        log error "当前仅支持 CentOS 7.9 版本"
+    # 定义支持的 CentOS 7.x 版本列表
+    local supported_versions=(
+        "CentOS Linux release 7.9"
+        "CentOS Linux release 7.8"
+        "CentOS Linux release 7.7"
+        "CentOS Linux release 7.6"
+    )
+    
+    # 检查是否为支持的版本
+    local version_supported=0
+    local detected_version=""
+    
+    for version in "${supported_versions[@]}"; do
+        if echo "$full_version" | grep -q "$version"; then
+            version_supported=1
+            detected_version="$version"
+            break
+        fi
+    done
+    
+    if [ $version_supported -eq 0 ]; then
+        log error "当前系统版本不支持"
+        log error "支持的版本包括："
+        for version in "${supported_versions[@]}"; do
+            log error "  - ${version}"
+        done
         log error "检测到系统版本为: ${full_version}"
         exit 1
     fi
     
     # 获取具体的小版本号
-    local full_version=$(cat /etc/centos-release | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
-    log info "系统版本检查通过: CentOS ${full_version}"
+    local version_number=$(echo "$full_version" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    log info "系统版本检查通过: CentOS ${version_number}"
     
     # 检查系统架构
     local arch=$(uname -m)
@@ -117,6 +140,22 @@ function check_system_version() {
         exit 1
     fi
     log info "SELinux 状态检查通过: ${selinux_status}"
+    
+    # 根据不同版本输出特定的警告或建议
+    case "$detected_version" in
+        "CentOS Linux release 7.9")
+            log info "检测到最新的 CentOS 7.9 版本，推荐使用此版本"
+            ;;
+        "CentOS Linux release 7.8")
+            log info "警告: CentOS 7.8 版本可能存在已知安全漏洞，建议升级到 7.9"
+            ;;
+        "CentOS Linux release 7.7")
+            log info "警告: CentOS 7.7 版本较旧，建议升级到 7.9"
+            ;;
+        "CentOS Linux release 7.6")
+            log info "警告: CentOS 7.6 版本过旧，强烈建议升级到 7.9"
+            ;;
+    esac
     
     return 0
 }
