@@ -391,9 +391,18 @@ function process_materials() {
     log info "配置YUM源..."
     setup_yum_repo || { log error "配置YUM源失败"; exit 1; }
 
-    # 4. 安装和配置Docker
-    log info "安装和配置Docker..."
-    setup_docker || { log error "安装和配置Docker失败"; exit 1; }
+    # 检查必要的 RPM 包
+    check_docker_rpms || {
+        log error "Docker RPM 包检查失败"
+        exit 1
+    }
+
+    # 安装和配置 Docker
+    log info "安装和配置 Docker..."
+    setup_docker || {
+        log error "Docker 安装和配置失败"
+        exit 1
+    }
 
     # 5. 最后加载本地镜像
     log info "加载本地镜像..."
@@ -409,54 +418,138 @@ function process_materials() {
 function setup_docker() {
     log info "检查并安装 Docker..."
     
-    # 检查 Docker 是否已安装
-    if command -v docker >/dev/null 2>&1; then
-        log info "Docker 已安装"
-    else
-        log info "开始安装 Docker..."
-        yum install -y docker || {
-            log error "Docker 安装失败"
+    # 1. 首先检查 RPM 包是否可用
+    check_docker_rpms || {
+        log error "Docker RPM 包检查失败，无法继续安装"
+        exit 1
+    }
+    
+    # 2. 检查是否已安装 Docker
+    if command -v docker &>/dev/null; then
+        if check_docker_status; then
+            log info "Docker 已安装且运行正常"
+            return 0
+        else
+            log info "检测到 Docker 已安装但未正常运行，尝试修复..."
+            systemctl stop docker || true
+            systemctl disable docker || true
+        fi
+    fi
+
+    # 2. 安装基础依赖包
+    log info "安装基础依赖包..."
+    yum install -y yum-utils device-mapper-persistent-data lvm2 || {
+        log error "安装基础依赖包失败"
+        exit 1
+    }
+
+    # 3. 安装 Docker CE 及其组件
+    log info "安装 Docker CE 及其组件..."
+    yum install -y docker-ce docker-ce-cli containerd.io || {
+        log error "Docker 安装失败，请检查 YUM 源配置"
+        exit 1
+    }
+
+    # 4. 配置 Docker daemon
+    log info "配置 Docker daemon..."
+    mkdir -p /etc/docker
+    
+    # 备份现有的 daemon.json（如果存在）
+    if [ -f "/etc/docker/daemon.json" ]; then
+        local timestamp=$(date +%Y%m%d_%H%M%S)
+        local backup_file="/etc/docker/daemon.json.bak.${timestamp}"
+        log info "备份现有的 daemon.json 到 ${backup_file}"
+        cp -f "/etc/docker/daemon.json" "${backup_file}" || {
+            log error "备份 daemon.json 失败"
             exit 1
         }
     fi
-    
-    # 检查 Docker 服务状态并启动
-    if systemctl is-active docker >/dev/null 2>&1; then
-        log info "Docker 服务已运行"
-    else
-        log info "启动 Docker 服务..."
-        systemctl start docker || {
-            log error "Docker 服务启动失败"
-            exit 1
-        }
+
+    # 创建新的 daemon.json
+    log info "创建新的 daemon.json 配置文件..."
+    cat > /etc/docker/daemon.json <<EOF
+{
+    "insecure-registries": ["0.0.0.0/0"],
+    "exec-opts": ["native.cgroupdriver=systemd"],
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "100m"
+    },
+    "storage-driver": "overlay2"
+}
+EOF
+
+    # 5. 启动 Docker 服务
+    log info "启动 Docker 服务..."
+    systemctl daemon-reload
+    systemctl enable docker
+    if ! systemctl start docker; then
+        log error "Docker 服务启动失败，查看详细错误信息："
+        journalctl -xeu docker --no-pager | tail -n 50
+        exit 1
     fi
-    
-    # 设置 Docker 开机自启
-    if systemctl is-enabled docker >/dev/null 2>&1; then
-        log info "Docker 已设置开机自启"
-    else
-        log info "设置 Docker 开机自启..."
-        systemctl enable docker || {
-            log error "设置 Docker 开机自启失败"
-            exit 1
-        }
-    fi
-    
-    # 等待 Docker 服务完全启动
+
+    # 7. 验证安装
+    log info "验证 Docker 安装..."
     local max_retries=30
     local retry_count=0
     while [ $retry_count -lt $max_retries ]; do
-        if docker info >/dev/null 2>&1; then
-            log info "Docker 服务已就绪"
+        if check_docker_status; then
+            log info "Docker 安装成功并正常运行"
+            docker version
             return 0
         fi
         log info "等待 Docker 服务就绪... (${retry_count}/${max_retries})"
         sleep 2
         ((retry_count++))
     done
-    
+
     log error "Docker 服务启动超时"
     exit 1
+}
+
+# 添加一个用于检查 Docker 运行状态的辅助函数
+function check_docker_status() {
+    log info "检查 Docker 运行状态..."
+    
+    # 检查 Docker 守护进程是否运行
+    if ! systemctl is-active docker &>/dev/null; then
+    
+        return 1
+    fi
+
+    # 检查 Docker 命令是否可用
+    if ! docker version &>/dev/null; then
+        log error "Docker 命令执行失败"
+        return 1
+    fi
+
+    # 尝试运行测试容器
+    if ! docker run --rm hello-world &>/dev/null; then
+        log error "Docker 容器测试失败"
+        return 1
+    fi
+
+    log info "Docker 运行状态正常"
+    return 0
+}
+
+# 添加一个新函数用于检查 RPM 包是否存在
+function check_docker_rpms() {
+    log info "检查 Docker RPM 包是否存在..."
+    local required_rpms=(
+        "docker-ce"
+        "docker-ce-cli"
+        "containerd.io"
+    )
+
+    for rpm in "${required_rpms[@]}"; do
+        if ! yum list available "$rpm" &>/dev/null; then
+            log error "找不到 $rpm 包，请确保 YUM 源中包含该包"
+            return 1
+        fi
+    done
+    return 0
 }
 
 # 配置YUM仓库
