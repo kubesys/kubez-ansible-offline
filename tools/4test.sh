@@ -74,8 +74,61 @@ function set_base_dir() {
 # 在 init_env 函数之前添加 ALL_IN_ONE 变量的设置
 
 
-# 修改 init_env 函数
+# 添加检查系统版本的函数
+function check_system_version() {
+    log info "检查系统版本..."
+    
+    # 检查是否为 CentOS 系统
+    if [ ! -f "/etc/centos-release" ]; then
+        log error "当前仅支持 CentOS 系统"
+        exit 1
+    }
+    
+    # 获取完整的系统版本信息
+    local full_version=$(cat /etc/centos-release)
+    
+    # 检查是否为 CentOS 7.9
+    if ! echo "$full_version" | grep -q "CentOS Linux release 7.9"; then
+        log error "当前仅支持 CentOS 7.9 版本"
+        log error "检测到系统版本为: ${full_version}"
+        exit 1
+    }
+    
+    # 获取具体的小版本号
+    local full_version=$(cat /etc/centos-release | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+    log info "系统版本检查通过: CentOS ${full_version}"
+    
+    # 检查系统架构
+    local arch=$(uname -m)
+    if [ "$arch" != "x86_64" ]; then
+        log error "当前仅支持 x86_64 架构，检测到系统架构为 ${arch}"
+        exit 1
+    }
+    log info "系统架构检查通过: ${arch}"
+    
+    # 检查系统内核版本
+    local kernel_version=$(uname -r)
+    log info "当前系统内核版本: ${kernel_version}"
+    
+    # 检查 SELinux 状态
+    local selinux_status=$(getenforce 2>/dev/null || echo "Unknown")
+    if [ "$selinux_status" = "Enforcing" ]; then
+        log error "请先禁用 SELinux"
+        exit 1
+    fi
+    log info "SELinux 状态检查通过: ${selinux_status}"
+    
+    return 0
+}
+
+# 修改 init_env 函数，添加系统版本检查
 function init_env() {
+    # 首先检查内存
+    check_memory
+    
+    # 然后检查系统版本
+    check_system_version
+    
     # 设置基础目录
     set_base_dir
     
@@ -210,7 +263,7 @@ function check_ports_availability() {
     if [ ${port_check_failed} -eq 1 ]; then
         log error "存在端口冲突，请解决后重试"
         return 1
-    fi
+        fi
     
     log info "所有必要端口均可用"
     return 0
@@ -249,8 +302,8 @@ function pre_install_check() {
     # 检查所有必需端口
     if ! check_ports_availability; then
         log error "端口检查失败，无法继续安装"
-        exit 1
-    fi
+            exit 1
+        fi
     
     log info "安装前检查完成"
     return 0
@@ -392,8 +445,6 @@ function check_files() {
 
 # 安装nexus
 function install_nexus() {
-    check_memory
-    
     # 检查是否已安装
     if [ -d "/data/nexus_local" ]; then
         log info "Nexus 目录已存在"
@@ -450,14 +501,8 @@ function process_materials() {
     log info "配置YUM源..."
     setup_yum_repo || { log error "配置YUM源失败"; exit 1; }
 
-    # 检查必要的 RPM 包
-    check_docker_rpms || {
-        log error "Docker RPM 包检查失败"
-        exit 1
-    }
-
-    # 安装和配置 Docker
-    log info "安装和配置 Docker..."
+    # 7. 检查并安装 Docker
+    log info "检查并安装 Docker..."
     setup_docker || {
         log error "Docker 安装和配置失败"
         exit 1
@@ -468,7 +513,7 @@ function process_materials() {
     if [ -d "image" ] && [ -f "image/load.sh" ]; then
         cd "image" && sh load.sh || { log error "加载本地镜像失败"; exit 1; }
         cd ${PKGPWD}
-    fi
+        fi
 
     log info "所有材料处理完成"
 }
@@ -477,30 +522,31 @@ function process_materials() {
 function setup_docker() {
     log info "检查并安装 Docker..."
     
-    # 1. 首先检查 RPM 包是否可用
-    check_docker_rpms || {
-        log error "Docker RPM 包检查失败，无法继续安装"
-        exit 1
-    }
-    
-    # 2. 检查是否已安装 Docker
+    # 1. 首先检查 Docker 是否已安装且运行正常
     if command -v docker &>/dev/null; then
         if check_docker_status; then
             log info "Docker 已安装且运行正常"
             return 0
-        else
+    else
             log info "检测到 Docker 已安装但未正常运行，尝试修复..."
             systemctl stop docker || true
             systemctl disable docker || true
         fi
     fi
 
-    # 2. 安装基础依赖包
+    # 2. 检查 RPM 包是否可用
+    log info "检查 Docker RPM 包是否可用..."
+    if ! check_docker_rpms; then
+        log error "Docker RPM 包检查失败，无法继续安装"
+        exit 1
+    fi
+
+    # 3. 安装基础依赖包
     log info "安装基础依赖包..."
     yum install -y yum-utils device-mapper-persistent-data lvm2 || {
         log error "安装基础依赖包失败"
-        exit 1
-    }
+            exit 1
+        }
 
     # 3. 安装 Docker CE 及其组件
     log info "安装 Docker CE 及其组件..."
@@ -518,12 +564,9 @@ function setup_docker() {
         local timestamp=$(date +%Y%m%d_%H%M%S)
         local backup_file="/etc/docker/daemon.json.bak.${timestamp}"
         log info "备份现有的 daemon.json 到 ${backup_file}"
-        cp -f "/etc/docker/daemon.json" "${backup_file}" || {
-            log error "备份 daemon.json 失败"
-            exit 1
-        }
+        cp -f "/etc/docker/daemon.json" "${backup_file}"
     fi
-
+    
     # 创建新的 daemon.json
     log info "创建新的 daemon.json 配置文件..."
     cat > /etc/docker/daemon.json <<EOF
@@ -562,7 +605,7 @@ EOF
         sleep 2
         ((retry_count++))
     done
-
+    
     log error "Docker 服务启动超时"
     exit 1
 }
