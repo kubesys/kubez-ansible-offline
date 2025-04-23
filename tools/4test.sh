@@ -82,7 +82,7 @@ function check_system_version() {
     if [ ! -f "/etc/centos-release" ]; then
         log error "当前仅支持 CentOS 系统"
         exit 1
-    }
+    fi
     
     # 获取完整的系统版本信息
     local full_version=$(cat /etc/centos-release)
@@ -92,7 +92,7 @@ function check_system_version() {
         log error "当前仅支持 CentOS 7.9 版本"
         log error "检测到系统版本为: ${full_version}"
         exit 1
-    }
+    fi
     
     # 获取具体的小版本号
     local full_version=$(cat /etc/centos-release | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
@@ -103,7 +103,7 @@ function check_system_version() {
     if [ "$arch" != "x86_64" ]; then
         log error "当前仅支持 x86_64 架构，检测到系统架构为 ${arch}"
         exit 1
-    }
+    fi
     log info "系统架构检查通过: ${arch}"
     
     # 检查系统内核版本
@@ -210,19 +210,55 @@ function disable_firewall() {
 # 检查端口是否被占用
 function check_port_usage() {
     local port=$1
+    local service_name=$2
     local timeout=1  # 设置超时时间为1秒
     
     log info "检查端口 ${port} 是否被占用..."
     
     # 使用 ss 命令检查端口占用
     if ss -Hln "sport = :${port}" | grep -q ":${port}"; then
-        log error "端口 ${port} 已被占用"
+        # 特殊处理 Nexus 端口 (58000, 58001)
+        if [ "$port" = "58000" ] || [ "$port" = "58001" ]; then
+            if systemctl is-active nexus &>/dev/null; then
+                log info "端口 ${port} 被 Nexus 服务占用，这是预期的行为"
+                return 0
+            elif pgrep -f "nexus" >/dev/null; then
+                log info "端口 ${port} 被 Nexus 进程占用，这是预期的行为"
+                return 0
+            fi
+        fi
+        
+        # 特殊处理 Harbor 端口
+        if [ "$port" = "${HARBOR_PORT}" ]; then
+            if systemctl is-active harbor &>/dev/null; then
+                log info "端口 ${port} 被 Harbor 服务占用，这是预期的行为"
+                return 0
+            elif docker ps | grep -q "goharbor/nginx-photon"; then
+                log info "端口 ${port} 被 Harbor 容器占用，这是预期的行为"
+                return 0
+            fi
+        fi
+        
+        log error "端口 ${port} 已被其他服务占用"
         return 1
     fi
     
     # 使用 /dev/tcp 进行双重检查
     if timeout ${timeout} bash -c "</dev/tcp/127.0.0.1/${port}" &>/dev/null; then
-        log error "端口 ${port} 已被占用"
+        # 再次进行 Nexus 和 Harbor 的特殊处理
+        if [ "$port" = "58000" ] || [ "$port" = "58001" ]; then
+            if systemctl is-active nexus &>/dev/null || pgrep -f "nexus" >/dev/null; then
+                log info "端口 ${port} 被 Nexus 服务占用，这是预期的行为"
+                return 0
+            fi
+        elif [ "$port" = "${HARBOR_PORT}" ]; then
+            if systemctl is-active harbor &>/dev/null || docker ps | grep -q "goharbor/nginx-photon"; then
+                log info "端口 ${port} 被 Harbor 服务占用，这是预期的行为"
+                return 0
+            fi
+        fi
+        
+        log error "端口 ${port} 已被其他服务占用"
         return 1
     fi
     
@@ -253,7 +289,7 @@ function check_ports_availability() {
     # 检查每个端口
     for port in "${!ports[@]}"; do
         log info "检查 ${ports[$port]} (${port})"
-        if ! check_port_usage "${port}"; then
+        if ! check_port_usage "${port}" "${ports[$port]}"; then
             log error "${ports[$port]} (${port}) 被占用"
             port_check_failed=1
         fi
@@ -263,7 +299,7 @@ function check_ports_availability() {
     if [ ${port_check_failed} -eq 1 ]; then
         log error "存在端口冲突，请解决后重试"
         return 1
-        fi
+    fi
     
     log info "所有必要端口均可用"
     return 0
