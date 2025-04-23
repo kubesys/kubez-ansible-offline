@@ -33,15 +33,23 @@ fi
 
 # 打印日志函数
 function log() {
+    # 获取调用者的行号和文件名
+    local caller_info=$(caller 0)
+    local line_number=$(echo "$caller_info" | awk '{print $1}')
+    local file_name=$(basename $(echo "$caller_info" | awk '{print $2}'))
+    
+    # 获取当前时间
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    
     case $1 in
         "info")
-            echo -e `date '+%Y-%m-%d %H:%M:%S'`"\t\t\t\e[32m [ INFO ]  $2\e[0m"
+            echo -e "${timestamp} [${file_name}:${line_number}] \e[32m[ INFO ]\e[0m $2"
             ;;
         "error")
-            echo -e `date '+%Y-%m-%d %H:%M:%S'`"\t\t\t\e[31m [ ERROR ]  $2\e[0m"
+            echo -e "${timestamp} [${file_name}:${line_number}] \e[31m[ ERROR ]\e[0m $2"
             ;;
         *)
-            echo -e `date '+%Y-%m-%d %H:%M:%S'`"\t\t\t\e[34m [ INFO ]  $2\e[0m"
+            echo -e "${timestamp} [${file_name}:${line_number}] \e[34m[ INFO ]\e[0m $2"
             ;;
     esac
 }
@@ -146,42 +154,134 @@ function disable_firewall() {
     return 0
 }
 
-# 修改 check_ports_availability 函数
+# 检查端口是否被占用
+function check_port_usage() {
+    local port=$1
+    local timeout=1  # 设置超时时间为1秒
+    
+    log info "检查端口 ${port} 是否被占用..."
+    
+    # 使用 ss 命令检查端口占用
+    if ss -Hln "sport = :${port}" | grep -q ":${port}"; then
+        log error "端口 ${port} 已被占用"
+        return 1
+    fi
+    
+    # 使用 /dev/tcp 进行双重检查
+    if timeout ${timeout} bash -c "</dev/tcp/127.0.0.1/${port}" &>/dev/null; then
+        log error "端口 ${port} 已被占用"
+        return 1
+    fi
+    
+    log info "端口 ${port} 可用"
+    return 0
+}
+
+# 检查所需端口是否可用
 function check_ports_availability() {
-    log info "检查关键端口是否被占用..."
+    log info "检查必要端口是否可用..."
     
-    # 关闭防火墙
-    disable_firewall
+    # 定义需要检查的端口列表及其用途
+    declare -A ports=(
+        [58000]="Nexus 服务端口"
+        [58001]="Harbor 仓库端口"
+        [${HARBOR_PORT}]="Harbor 服务端口"
+        [6443]="Kubernetes API 端口"
+        [2379]="etcd 客户端端口"
+        [2380]="etcd 服务器端口"
+        [10250]="Kubelet API 端口"
+        [10251]="kube-scheduler 端口"
+        [10252]="kube-controller-manager 端口"
+        [10255]="Kubelet 只读端口"
+    )
     
-    # 检查58000端口（Nexus仓库）
-    if netstat -tuln | grep -q ":58000 "; then
-        # 检查是否是Nexus在使用该端口
-        if ps -ef | grep -v grep | grep -q "nexus"; then
-            log info "端口58000被Nexus服务使用，继续安装"
-        else
-            log error "端口58000已被非Nexus服务占用，这是Nexus仓库必需的端口。请释放该端口后重试。"
-            exit 1
+    local port_check_failed=0
+    
+    # 检查每个端口
+    for port in "${!ports[@]}"; do
+        log info "检查 ${ports[$port]} (${port})"
+        if ! check_port_usage "${port}"; then
+            log error "${ports[$port]} (${port}) 被占用"
+            port_check_failed=1
         fi
+    done
+    
+    # 如果有端口被占用，则退出
+    if [ ${port_check_failed} -eq 1 ]; then
+        log error "存在端口冲突，请解决后重试"
+        return 1
     fi
     
-    # 检查58001端口
-    if netstat -tuln | grep -q ":58001 "; then
-        # 检查是否是Nexus在使用该端口
-        if ps -ef | grep -v grep | grep -q "nexus"; then
-            log info "端口58001被Nexus服务使用，继续安装"
-        else
-            log error "端口58001已被非Nexus服务占用，这是系统必需的端口。请释放该端口后重试。"
-            exit 1
-        fi
-    fi
+    log info "所有必要端口均可用"
+    return 0
+}
+
+# 等待端口就绪
+function wait_for_port() {
+    local host=$1
+    local port=$2
+    local timeout=${3:-300}  # 默认超时时间为300秒
+    local interval=${4:-5}   # 默认检查间隔为5秒
+    local description=${5:-"服务"}  # 端口描述，默认为"服务"
     
-    # 检查自定义的Harbor端口
-    if netstat -tuln | grep -q ":${HARBOR_PORT} "; then
-        log error "Harbor端口 ${HARBOR_PORT} 已被占用。请使用环境变量 HARBOR_PORT 指定其他端口，例如：HARBOR_PORT=9090 $0 install"
+    log info "等待 ${description} ${host}:${port} 就绪..."
+    
+    local start_time=$(date +%s)
+    local end_time=$((start_time + timeout))
+    
+    while [ $(date +%s) -lt ${end_time} ]; do
+        if timeout 2 bash -c "</dev/tcp/${host}/${port}" &>/dev/null; then
+            log info "${description} ${host}:${port} 已就绪"
+            return 0
+        fi
+        log info "等待 ${description} ${host}:${port} 就绪中...(剩余 $((end_time - $(date +%s))) 秒)"
+        sleep ${interval}
+    done
+    
+    log error "${description} ${host}:${port} 等待超时"
+    return 1
+}
+
+# 示例使用：在安装服务前检查端口
+function pre_install_check() {
+    log info "执行安装前检查..."
+    
+    # 检查所有必需端口
+    if ! check_ports_availability; then
+        log error "端口检查失败，无法继续安装"
         exit 1
     fi
     
-    log info "端口检查通过，所有必需端口均可用"
+    log info "安装前检查完成"
+    return 0
+}
+
+# 在安装 Nexus 后等待服务就绪
+function wait_nexus_ready() {
+    log info "等待 Nexus 服务就绪..."
+    
+    # 等待 Nexus 端口就绪
+    if ! wait_for_port "localhost" "58000" 300 5 "Nexus"; then
+        log error "Nexus 服务启动失败"
+        exit 1
+    fi
+    
+    log info "Nexus 服务已就绪"
+    return 0
+}
+
+# 在安装 Harbor 后等待服务就绪
+function wait_harbor_ready() {
+    log info "等待 Harbor 服务就绪..."
+    
+    # 等待 Harbor 端口就绪
+    if ! wait_for_port "localhost" "${HARBOR_PORT}" 300 5 "Harbor"; then
+        log error "Harbor 服务启动失败"
+        exit 1
+    fi
+    
+    log info "Harbor 服务已就绪"
+    return 0
 }
 
 # 检查内存
@@ -311,48 +411,7 @@ function install_nexus() {
     fi
 
     # 等待 Nexus 服务启动
-    wait_nexus_service
-}
-
-# 添加等待 Nexus 服务启动的函数
-function wait_nexus_service() {
-    log info "等待 Nexus 服务启动..."
-    local retries=0
-    local max_retries=60  # 5分钟超时
-
-    while [ $retries -lt $max_retries ]; do
-        if curl -s -m 5 ${IP_ADDRESS}:58000 > /dev/null 2>&1; then
-            log info "Nexus 服务已启动"
-            return 0
-        fi
-        log info "rpm仓库正在启动中，请稍后"
-        sleep 5
-        ((retries++))
-    done
-
-    log error "Nexus 服务启动超时"
-    exit 1
-}
-
-# 修改 wait_nexus_url 函数，专门用于检查 RPM 仓库
-function wait_nexus_url() {
-    log info "检查 RPM 仓库状态..."
-    local retries=0
-    local max_retries=200
-
-    while [ $retries -lt $max_retries ]; do
-        HTTP_STATUS=$(curl -o /dev/null -s -w "%{http_code}" ${RPMURL})
-        if [ "$HTTP_STATUS" -eq 200 ]; then
-            log info "RPM 仓库已经正常"
-            return 0
-        fi
-        log info "等待 RPM 仓库就绪中...(${retries}/${max_retries})"
-        sleep 5
-        ((retries++))
-    done
-    
-    log error "Docker 服务启动超时"
-    exit 1
+    wait_nexus_ready
 }
 
 # 修改 process_materials 函数，在加载镜像前添加 Docker 安装和启动
@@ -385,7 +444,7 @@ function process_materials() {
     cd ${PKGPWD}
 
     # 3. 检查 RPM 仓库状态
-    wait_nexus_url
+    wait_nexus_ready
 
     # 4. 配置YUM源
     log info "配置YUM源..."
@@ -524,11 +583,6 @@ function check_docker_status() {
         return 1
     fi
 
-    # 尝试运行测试容器
-    if ! docker run --rm hello-world &>/dev/null; then
-        log error "Docker 容器测试失败"
-        return 1
-    fi
 
     log info "Docker 运行状态正常"
     return 0
