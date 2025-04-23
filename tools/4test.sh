@@ -388,41 +388,53 @@ function setup_docker() {
     exit 1
 }
 
-# 修改 process_materials 函数，在加载镜像前添加 Docker 安装和启动
+# 修改 process_materials 函数，调整执行顺序
 function process_materials() {
     cd ${PKGPWD}
     
-    # 安装和启动 Docker
-    setup_docker
+    # 1. 首先解压所有需要的文件
+    log info "解压所需文件..."
     
-    # 处理镜像
+    # 解压远程镜像文件
     if [ ! -d "allimagedownload" ]; then
         log info "开始解压远程镜像文件"
         tar -zxvf k8s-centos7-v${KUBE_VERSION}_images.tar.gz || { log error "解压镜像文件失败"; exit 1; }
     fi
-    if [ ! -d "image" ]; then
-        log info "开始解压本地镜像文件"
-        tar -zxvf image.tar.gz || { log error "解压镜像文件失败"; exit 1; }
-    fi
 
-    # 处理RPM包
+    # 解压RPM包
     if [ ! -d "localrepo" ]; then
         log info "开始解压RPM包"
         tar -zxvf k8s-centos7-v${KUBE_VERSION}-rpm.tar.gz || { log error "解压RPM包失败"; exit 1; }
     fi
 
-    # 加载镜像和推送RPM包
-    cd image && sh load.sh || { log error "加载本地镜像失败"; exit 1; }
-    cd ../allimagedownload && sh load_image.sh ${IP_ADDRESS} || { log error "加载远程镜像失败"; exit 1; }
+    # 解压本地镜像文件
+    if [ ! -d "image" ]; then
+        log info "开始解压本地镜像文件"
+        tar -zxvf image.tar.gz || { log error "解压镜像文件失败"; exit 1; }
+    fi
+
+    # 2. 上传远程镜像和RPM包
+    log info "上传远程镜像和RPM包..."
+    cd allimagedownload && sh load_image.sh ${IP_ADDRESS} || { log error "加载远程镜像失败"; exit 1; }
     cd ../localrepo && sh push_rpm.sh ${IP_ADDRESS} || { log error "推送RPM包失败"; exit 1; }
     cd ${PKGPWD}
 
-    # 加载本地镜像
+    # 3. 配置YUM源
+    log info "配置YUM源..."
+    setup_yum_repo || { log error "配置YUM源失败"; exit 1; }
+
+    # 4. 安装和配置Docker
+    log info "安装和配置Docker..."
+    setup_docker || { log error "安装和配置Docker失败"; exit 1; }
+
+    # 5. 最后加载本地镜像
+    log info "加载本地镜像..."
     if [ -d "image" ] && [ -f "image/load.sh" ]; then
-        log info "开始加载本地镜像"
         cd "image" && sh load.sh || { log error "加载本地镜像失败"; exit 1; }
         cd ${PKGPWD}
     fi
+
+    log info "所有材料处理完成"
 }
 
 # 可选：添加 Docker 配置优化（如果需要）
@@ -1002,7 +1014,6 @@ function main() {
                     cleanup_old_data
                     check_files
                     install_nexus
-                    setup_yum_repo
                     process_materials
                     install_kubez_ansible
                     setup_kubernetes
