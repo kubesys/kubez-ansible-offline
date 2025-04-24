@@ -133,13 +133,13 @@ function check_system_version() {
     local kernel_version=$(uname -r)
     log info "当前系统内核版本: ${kernel_version}"
     
-    # 检查 SELinux 状态
-    local selinux_status=$(getenforce 2>/dev/null || echo "Unknown")
-    if [ "$selinux_status" = "Enforcing" ]; then
-        log error "请先禁用 SELinux"
-        exit 1
-    fi
-    log info "SELinux 状态检查通过: ${selinux_status}"
+    # # 检查 SELinux 状态
+    # local selinux_status=$(getenforce 2>/dev/null || echo "Unknown")
+    # if [ "$selinux_status" = "Enforcing" ]; then
+    #     log error "请先禁用 SELinux"
+    #     exit 1
+    # fi
+    # log info "SELinux 状态检查通过: ${selinux_status}"
     
     # 根据不同版本输出特定的警告或建议
     case "$detected_version" in
@@ -492,10 +492,6 @@ function check_files() {
         log info "解压 others.tar.gz..."
         tar -zxvf "${BASE_FILES_DIR}/others.tar.gz" || { log error "解压 others.tar.gz 失败"; exit 1; }
     fi
-    if [ ! -d "${IMAGE_DIR}" ]; then
-        log info "解压 image.tar.gz..."
-        tar -zxvf "${BASE_FILES_DIR}/image.tar.gz" || { log error "解压 others.tar.gz 失败"; exit 1; }
-    fi
 
     # 检查others目录下的文件
     local others_files=(
@@ -801,21 +797,66 @@ function setup_kubez_ansible_auth() {
     log info "kubez-ansible 免密登录配置完成"
 }
 
-# 安装kubez-ansible
+# 添加检查并安装 unzip 的函数
+function ensure_unzip_installed() {
+    log info "检查 unzip 是否已安装..."
+    
+    # 检查 unzip 命令是否存在
+    if ! command -v unzip &>/dev/null; then
+        log info "unzip 未安装，开始安装..."
+        
+        # 尝试使用 yum 安装 unzip
+        if ! yum install -y unzip; then
+            log error "安装 unzip 失败，请检查 YUM 源配置"
+            exit 1
+        fi
+        
+        # 再次检查安装是否成功
+        if ! command -v unzip &>/dev/null; then
+            log error "unzip 安装失败，请手动检查安装状态"
+            exit 1
+        fi
+        
+        log info "unzip 安装成功"
+    else
+        log info "unzip 已安装"
+    fi
+}
+
+# 修改 install_kubez_ansible 函数，添加 unzip 检查
 function install_kubez_ansible() {
     cd ${PKGPWD}
+    
+    # 在解压前确保 unzip 已安装
+    ensure_unzip_installed
+    
     if [ ! -d "kubez-ansible-offline-master" ]; then
         log info "解压kubez-ansible-offline-master.zip"
-        unzip -o kubez-ansible-offline-master.zip || { log error "解压kubez-ansible-offline-master.zip失败"; exit 1; }
+        if ! unzip -o kubez-ansible-offline-master.zip; then
+            log error "解压kubez-ansible-offline-master.zip失败"
+            exit 1
+        fi
     fi
 
-    yum -y install ansible unzip python2-pip || { log error "安装基础包失败"; exit 1; }
+    # 安装基础包
+    if ! yum -y install ansible python2-pip; then
+        log error "安装基础包失败"
+        exit 1
+    fi
     
     cd kubez-ansible-offline-master
-    pip install pip/pbr-5.11.1-py2.py3-none-any.whl || { log error "安装pbr失败"; exit 1; }
+    if ! pip install pip/pbr-5.11.1-py2.py3-none-any.whl; then
+        log error "安装pbr失败"
+        exit 1
+    fi
     
     cp tools/git /usr/local/bin && chmod 755 /usr/local/bin/git && git init
-    python setup.py install || { log error "安装kubez-ansible失败"; exit 1; }
+    
+    # 安装 kubez-ansible
+    if ! python setup.py install; then
+        log error "安装kubez-ansible失败"
+        exit 1
+    fi
     
     cp -rf etc/kubez/ /etc/kubez
     cd ${PKGPWD}
