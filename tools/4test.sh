@@ -24,7 +24,7 @@ export KUBEZ_ANSIBLE_DIR="${PKGPWD}/kubez-ansible-offline-master"
 
 # 设置 INVENTORY 变量
 if [ -z "${INVENTORY}" ]; then
-    export INVENTORY="${BASEDIR}/ansible/inventory/all-in-one"
+    export INVENTORY="/usr/share/kubez-ansible/ansible/inventory/all-in-one"
 fi
 
 # 从 base.sh 获取一些有用的变量
@@ -1111,9 +1111,44 @@ function check_harbor_connectivity() {
     fi
 }
 
-# 安装Harbor
+# 添加安装 docker-compose 的函数
+function install_docker_compose() {
+    log info "检查并安装 docker-compose..."
+    
+    # 检查 docker-compose 是否已安装
+    if command -v docker-compose &>/dev/null; then
+        local current_version=$(docker-compose --version | awk '{print $3}' | tr -d ',')
+        log info "docker-compose 已安装，版本: ${current_version}"
+        return 0
+    fi
+    
+    # 安装 docker-compose
+    log info "开始安装 docker-compose..."
+    
+    # 使用 yum 安装
+    if ! yum install -y docker-compose; then
+        log error "通过 yum 安装 docker-compose 失败"
+        exit 1
+    fi
+    
+    # 验证安装
+    if ! command -v docker-compose &>/dev/null; then
+        log error "docker-compose 安装失败"
+        exit 1
+    fi
+    
+    local installed_version=$(docker-compose --version | awk '{print $3}' | tr -d ',')
+    log info "docker-compose 安装成功，版本: ${installed_version}"
+    return 0
+}
+
+# 修改 install_harbor 函数，添加 docker-compose 安装步骤
 function install_harbor() {
     log info "安装 Harbor"
+    
+    # 首先安装 docker-compose
+    install_docker_compose || { log error "安装 docker-compose 失败"; exit 1; }
+    
     cd "${OTHERS_DIR}/harbor" || { log error "进入harbor目录失败"; exit 1; }
 
     # Stop and clean up existing Harbor installation
