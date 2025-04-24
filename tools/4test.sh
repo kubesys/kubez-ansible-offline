@@ -924,7 +924,7 @@ function update_inventory() {
     if [ ! -f "${inventory_file}" ]; then
         log error "inventory 文件不存在: ${inventory_file}"
         exit 1
-    }
+    fi
     
     # 创建临时文件
     local temp_file="${inventory_file}.tmp"
@@ -972,7 +972,7 @@ function update_inventory() {
     if [ ! -f "$temp_file" ]; then
         log error "创建临时 inventory 文件失败"
         exit 1
-    }
+    fi
     
     # 备份原文件
     local backup_file="${inventory_file}.bak.$(date +%Y%m%d_%H%M%S)"
