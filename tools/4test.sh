@@ -1238,17 +1238,11 @@ function install_kube_ovn() {
 
 # 修改 setup_univirt_inventory 函数
 function setup_univirt_inventory() {
-    local source_dir="${PKGPWD}"
     local target_dir="${OTHERS_DIR}/uni-virt"
     local inventory_file="inventory.ini"
+    local full_path="${target_dir}/${inventory_file}"
     
-    log info "配置 UniVirt 的 inventory 文件"
-    
-    # 检查源文件是否存在
-    if [ ! -f "${source_dir}/${inventory_file}" ]; then
-        log error "源 inventory 文件不存在: ${source_dir}/${inventory_file}"
-        exit 1
-    fi
+    log info "配置 UniVirt 的 inventory 文件: ${full_path}"
     
     # 检查目标目录是否存在
     if [ ! -d "${target_dir}" ]; then
@@ -1256,17 +1250,18 @@ function setup_univirt_inventory() {
         exit 1
     fi
     
-    # 如果目标文件存在，直接删除
-    if [ -f "${target_dir}/${inventory_file}" ]; then
-        log info "删除已存在的 inventory 文件"
-        rm -f "${target_dir}/${inventory_file}" || {
-            log error "删除已存在的 inventory 文件失败"
+    # 如果目标文件存在，创建备份
+    if [ -f "${full_path}" ]; then
+        local backup_file="${full_path}.bak.$(date +%Y%m%d_%H%M%S)"
+        log info "创建现有 inventory 文件的备份: ${backup_file}"
+        cp -f "${full_path}" "${backup_file}" || {
+            log error "备份现有 inventory 文件失败"
             exit 1
         }
     fi
     
     # 创建临时文件
-    local temp_file="${target_dir}/${inventory_file}.tmp"
+    local temp_file="${full_path}.tmp"
     
     # 使用当前节点IP更新inventory内容
     {
@@ -1295,19 +1290,19 @@ function setup_univirt_inventory() {
     fi
     
     # 移动临时文件到目标位置
-    mv "$temp_file" "${target_dir}/${inventory_file}" || {
+    mv "$temp_file" "${full_path}" || {
         log error "更新 inventory 文件失败"
         rm -f "$temp_file"
         exit 1
     }
     
     # 设置适当的权限
-    chmod 644 "${target_dir}/${inventory_file}" || {
+    chmod 644 "${full_path}" || {
         log error "设置 inventory 文件权限失败"
         exit 1
     }
     
-    log info "成功更新 UniVirt 的 inventory 文件"
+    log info "成功更新 UniVirt 的 inventory 文件: ${full_path}"
     return 0
 }
 
