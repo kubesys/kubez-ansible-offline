@@ -187,7 +187,7 @@ function init_env() {
     fi
     # 输出所有的配置参数
     
-    export LOCAL_REGISTRY="${IP_ADDRESS}:${HARBOR_PORT}/pixiuio"
+    export LOCAL_REGISTRY="${IP_ADDRESS}:58001/pixiuio"
     export YUM_REPO="http://${IP_ADDRESS}:58000/repository/pixiuio-centos"
     export CONTAINER_REGISTRY="${IP_ADDRESS}:${HARBOR_PORT}"
     export RPMURL="http://${IP_ADDRESS}:58000/repository/pixiuio-centos/repodata/repomd.xml"
@@ -936,6 +936,7 @@ function setup_kubernetes() {
     sed -i "s/kube_release: .*/kube_release: ${KUBE_VERSION}/g" /etc/kubez/globals.yml
     sed -i "s/network_interface: .*/network_interface: \"${NETWORK_INTERFACE}\"/g" /etc/kubez/globals.yml
     sed -i "s|yum_baseurl: .*|yum_baseurl: \"${YUM_REPO}\"|g" /etc/kubez/globals.yml
+    sed -i "s|image_repository: .*|image_repository: \"${LOCAL_REGISTRY}\"|g" /etc/kubez/globals.yml
     sed -i "s|image_repository_container: .*|image_repository_container: \"${CONTAINER_REGISTRY}\"|g" /etc/kubez/globals.yml
     sed -i "s/cluster_cidr: .*/cluster_cidr: \"172.30.0.0\/16\"/g" /etc/kubez/globals.yml
     sed -i "s/service_cidr: .*/service_cidr: \"10.254.0.0\/16\"/g" /etc/kubez/globals.yml
