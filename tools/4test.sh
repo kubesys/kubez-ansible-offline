@@ -179,6 +179,8 @@ function init_env() {
     export KUBE_VERSION="1.23.17"
     # 允许用户自定义Harbor端口，默认为8080
     export HARBOR_PORT=${HARBOR_PORT:-8080}
+    # 添加 UniVirt 版本环境变量，允许用户自定义，默认为v1.0.0.lab
+    export UNIVIRT_VERSION=${UNIVIRT_VERSION:-"v1.0.0.lab"}
     
     # 检查Harbor端口是否为禁用端口
     if [ "$HARBOR_PORT" = "58000" ] || [ "$HARBOR_PORT" = "58001" ]; then
@@ -1311,7 +1313,7 @@ function install_uni_virt() {
     log info "检查 Kubernetes 集群状态"
     check_kubernetes_ready
     
-    log info "安装 uni-virt"
+    log info "安装 uni-virt，版本: ${UNIVIRT_VERSION}"
     cd "${OTHERS_DIR}/uni-virt" || { log error "进入uni-virt目录失败"; exit 1; }
 
     # 配置 inventory 文件
@@ -1322,17 +1324,45 @@ function install_uni_virt() {
     WORKER_NODES="${IP_ADDRESS}"
 
     # 安装步骤
-    ansible-playbook -i inventory.ini -e "offline=1" scripts/ansible/playbooks/install_packages_and_dependencies.yml || { log error "安装uni-virt依赖失败"; exit 1; }
-    ansible-playbook -i inventory.ini scripts/ansible/playbooks/install_and_setup_chrony.yml || { log error "设置集群时区失败"; exit 1; }
-    ansible-playbook -i inventory.ini scripts/ansible/playbooks/label_k8s_nodes.yml || { log error "节点打标签失败"; exit 1; }
+    ansible-playbook -i inventory.ini -e "offline=1" scripts/ansible/playbooks/install_packages_and_dependencies.yml || { 
+        log error "安装uni-virt依赖失败"; 
+        exit 1; 
+    }
+    
+    ansible-playbook -i inventory.ini scripts/ansible/playbooks/install_and_setup_chrony.yml || { 
+        log error "设置集群时区失败"; 
+        exit 1; 
+    }
+    
+    ansible-playbook -i inventory.ini scripts/ansible/playbooks/label_k8s_nodes.yml || { 
+        log error "节点打标签失败"; 
+        exit 1; 
+    }
 
-    VERSION="v1.0.0.lab"
-    bash scripts/shells/release-offline-centos7.sh ${VERSION} || { log error "打镜像失败"; exit 1; }
-    ansible-playbook -i localhost -e "ver=${VERSION} offline=1" scripts/ansible/playbooks/install_uniVirt.yml || { log error "安装uni-virt失败"; exit 1; }
-    ansible-playbook -i inventory.ini -e "offline=1" scripts/ansible/playbooks/create_comm_service_env.yml || { log error "配置外部服务失败"; exit 1; }
+    # 使用环境变量中的版本
+    log info "打包镜像，使用版本: ${UNIVIRT_VERSION}"
+    bash scripts/shells/release-offline-centos7.sh ${UNIVIRT_VERSION} || { 
+        log error "打镜像失败"; 
+        exit 1; 
+    }
+    
+    ansible-playbook -i localhost -e "ver=${UNIVIRT_VERSION} offline=1" scripts/ansible/playbooks/install_uniVirt.yml || { 
+        log error "安装uni-virt失败"; 
+        exit 1; 
+    }
+    
+    ansible-playbook -i inventory.ini -e "offline=1" scripts/ansible/playbooks/create_comm_service_env.yml || { 
+        log error "配置外部服务失败"; 
+        exit 1; 
+    }
 
     # 验证安装
-    kubectl get po -n kube-system | grep virt-tool || { log error "uni-virt程序未正常运行"; exit 1; }
+    kubectl get po -n kube-system | grep virt-tool || { 
+        log error "uni-virt程序未正常运行"; 
+        exit 1; 
+    }
+    
+    log info "uni-virt ${UNIVIRT_VERSION} 安装完成"
     cd "${PKGPWD}"
 }
 
@@ -1406,12 +1436,14 @@ function show_help() {
     echo "  help        显示此帮助信息"
     echo ""
     echo "环境变量:"
-    echo "  HARBOR_PORT  设置Harbor端口 (默认: 8080)"
+    echo "  HARBOR_PORT      设置Harbor端口 (默认: 8080)"
+    echo "  UNIVIRT_VERSION  设置UniVirt版本 (默认: v1.0.0.lab)"
     echo ""
     echo "示例:"
-    echo "  $0 install all                    # 完整安装所有组件"
-    echo "  $0 install harbor                # 仅安装 Harbor"
-    echo "  HARBOR_PORT=9090 $0 install harbor  # 使用自定义端口安装 Harbor"
+    echo "  $0 install all                                  # 完整安装所有组件"
+    echo "  $0 install harbor                              # 仅安装 Harbor"
+    echo "  HARBOR_PORT=9090 $0 install harbor            # 使用自定义端口安装 Harbor"
+    echo "  UNIVIRT_VERSION=v2.0.0 $0 install univirt    # 安装指定版本的 UniVirt"
 }
 
 # 清理旧的配置和数据
