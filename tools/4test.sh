@@ -1247,7 +1247,7 @@ function get_node_hostname() {
     hostname=$(hostname)
     
     # 检查获取到的 hostname 是否有效
-    if [ -n "$hostname" ] && [ "$hostname" != "localhost" ] && [ "$hostname" != "localhost.localdomain" ]; then
+    if [ -n "$hostname" ]; then
         echo "$hostname"
         return 0
     fi
