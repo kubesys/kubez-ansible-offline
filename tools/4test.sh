@@ -865,8 +865,60 @@ function install_kubez_ansible() {
     setup_kubez_ansible_auth
 }
 
-# 配置kubernetes环境
+# 添加检查和重置 Kubernetes 的函数
+function check_and_reset_kubernetes() {
+    log info "检查是否存在旧的 Kubernetes 配置..."
+    
+    # 检查 kubeadm 命令是否存在
+    if command -v kubeadm &>/dev/null; then
+        # 检查是否存在 Kubernetes 配置文件
+        if [ -f "/etc/kubernetes/admin.conf" ] || [ -d "/etc/kubernetes/manifests" ]; then
+            log info "检测到已有的 Kubernetes 配置，执行重置操作..."
+            
+            # 停止所有 Kubernetes 相关的容器
+            if command -v crictl &>/dev/null; then
+                log info "停止所有 Kubernetes 容器..."
+                crictl pods -q | xargs -r crictl stopp 2>/dev/null || true
+                crictl pods -q | xargs -r crictl rmp 2>/dev/null || true
+            fi
+            
+            # 执行 kubeadm reset
+            log info "执行 kubeadm reset..."
+            kubeadm reset -f || {
+                log error "kubeadm reset 执行失败"
+                exit 1
+            }
+            
+            # 清理额外的配置文件和目录
+            log info "清理 Kubernetes 配置文件和目录..."
+            rm -rf /etc/kubernetes/* || true
+            rm -rf /var/lib/kubelet/* || true
+            rm -rf /var/lib/etcd/* || true
+            rm -rf $HOME/.kube/config || true
+            
+            # 清理网络配置
+            log info "清理网络配置..."
+            ip link delete cni0 2>/dev/null || true
+            ip link delete flannel.1 2>/dev/null || true
+            
+            # 清理 iptables 规则
+            log info "清理 iptables 规则..."
+            iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
+            
+            log info "Kubernetes 重置完成"
+        else
+            log info "未检测到现有的 Kubernetes 配置，无需重置"
+        fi
+    else
+        log info "未检测到 kubeadm 命令，无需重置"
+    fi
+}
+
+# 修改 setup_kubernetes 函数，添加重置检查
 function setup_kubernetes() {
+    # 首先检查并重置已有的 Kubernetes 配置
+    check_and_reset_kubernetes
+    
     # 创建必要目录
     mkdir -p /etc/kubez
     mkdir -p /data/prometheus /data/grafana
@@ -883,7 +935,6 @@ function setup_kubernetes() {
     # 修改 globals.yml 配置
     sed -i "s/kube_release: .*/kube_release: ${KUBE_VERSION}/g" /etc/kubez/globals.yml
     sed -i "s/network_interface: .*/network_interface: \"${NETWORK_INTERFACE}\"/g" /etc/kubez/globals.yml
-    sed -i "s|image_repository: .*|image_repository: \"${LOCAL_REGISTRY}\"|g" /etc/kubez/globals.yml
     sed -i "s|yum_baseurl: .*|yum_baseurl: \"${YUM_REPO}\"|g" /etc/kubez/globals.yml
     sed -i "s|image_repository_container: .*|image_repository_container: \"${CONTAINER_REGISTRY}\"|g" /etc/kubez/globals.yml
     sed -i "s/cluster_cidr: .*/cluster_cidr: \"172.30.0.0\/16\"/g" /etc/kubez/globals.yml
