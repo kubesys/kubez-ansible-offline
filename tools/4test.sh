@@ -1238,6 +1238,25 @@ function install_kube_ovn() {
     bash "${OTHERS_DIR}/install.sh" || { log error "安装Kube-OVN失败"; exit 1; }
 }
 
+# 添加获取 hostname 的辅助函数
+function get_node_hostname() {
+    local ip="$1"
+    local hostname
+    
+    # 尝试获取 hostname
+    hostname=$(hostname)
+    
+    # 检查获取到的 hostname 是否有效
+    if [ -n "$hostname" ] && [ "$hostname" != "localhost" ] && [ "$hostname" != "localhost.localdomain" ]; then
+        echo "$hostname"
+        return 0
+    fi
+    
+    # 如果没有有效的 hostname，返回 IP 地址
+    echo "$ip"
+    return 0
+}
+
 # 修改 setup_univirt_inventory 函数
 function setup_univirt_inventory() {
     local target_dir="${OTHERS_DIR}/uni-virt"
@@ -1252,6 +1271,10 @@ function setup_univirt_inventory() {
         exit 1
     fi
     
+    # 获取节点标识（hostname 或 IP）
+    local node_identifier=$(get_node_hostname "${IP_ADDRESS}")
+    log info "使用节点标识: ${node_identifier}"
+    
     # 如果目标文件存在，创建备份
     if [ -f "${full_path}" ]; then
         local backup_file="${full_path}.bak.$(date +%Y%m%d_%H%M%S)"
@@ -1265,24 +1288,24 @@ function setup_univirt_inventory() {
     # 创建临时文件
     local temp_file="${full_path}.tmp"
     
-    # 使用当前节点IP更新inventory内容
+    # 使用节点标识更新 inventory 内容
     {
         # master 部分
         echo "[master] # 主节点组"
         echo "# 填节点hostname，即IP地址"
-        echo "${IP_ADDRESS}"
+        echo "${node_identifier}"
         echo ""
         
         # worker 部分
         echo "[worker] # 计算节点组"
         echo "# 填节点hostname，即IP地址"
-        echo "${IP_ADDRESS}"
+        echo "${node_identifier}"
         echo ""
         
         # chrony 部分
         echo "[chrony] # 时间服务器，只设置1台"
         echo "# 填节点hostname，即IP地址"
-        echo "${IP_ADDRESS}"
+        echo "${node_identifier}"
     } > "$temp_file"
     
     # 检查临时文件是否创建成功
@@ -1305,6 +1328,12 @@ function setup_univirt_inventory() {
     }
     
     log info "成功更新 UniVirt 的 inventory 文件: ${full_path}"
+    if [ "${node_identifier}" != "${IP_ADDRESS}" ]; then
+        log info "使用 hostname: ${node_identifier} 替代 IP: ${IP_ADDRESS}"
+    else
+        log info "未找到有效的 hostname，使用 IP 地址: ${IP_ADDRESS}"
+    fi
+    
     return 0
 }
 
