@@ -914,10 +914,98 @@ function check_and_reset_kubernetes() {
     fi
 }
 
-# 修改 setup_kubernetes 函数，添加重置检查
+# 添加更新 inventory 的函数
+function update_inventory() {
+    log info "更新 inventory 配置..."
+    
+    local inventory_file="${INVENTORY}"
+    
+    # 检查文件是否存在
+    if [ ! -f "${inventory_file}" ]; then
+        log error "inventory 文件不存在: ${inventory_file}"
+        exit 1
+    }
+    
+    # 创建临时文件
+    local temp_file="${inventory_file}.tmp"
+    
+    # 生成新的 inventory 内容
+    {
+        echo "[docker-master]"
+        echo "localhost       ansible_connection=local"
+        echo ""
+        echo "[docker-node]"
+        echo "localhost       ansible_connection=local"
+        echo ""
+        echo "[containerd-master]"
+        echo ""
+        echo "[containerd-node]"
+        echo ""
+        echo "[kube-master:children]"
+        echo "docker-master"
+        echo "containerd-master"
+        echo ""
+        echo "[kube-node:children]"
+        echo "docker-node"
+        echo "containerd-node"
+        echo ""
+        echo "[storage]"
+        echo "localhost       ansible_connection=local"
+        echo ""
+        echo "[baremetal:children]"
+        echo "kube-master"
+        echo "kube-node"
+        echo "storage"
+        echo ""
+        echo "[kubernetes:children]"
+        echo "kube-master"
+        echo "kube-node"
+        echo ""
+        echo "[nfs-server:children]"
+        echo "storage"
+        echo ""
+        echo "[haproxy:children]"
+        echo "kube-master"
+    } > "$temp_file"
+    
+    # 检查临时文件是否创建成功
+    if [ ! -f "$temp_file" ]; then
+        log error "创建临时 inventory 文件失败"
+        exit 1
+    }
+    
+    # 备份原文件
+    local backup_file="${inventory_file}.bak.$(date +%Y%m%d_%H%M%S)"
+    if ! cp "${inventory_file}" "${backup_file}"; then
+        log error "备份原 inventory 文件失败"
+        rm -f "$temp_file"
+        exit 1
+    fi
+    
+    # 替换原文件
+    if ! mv "$temp_file" "${inventory_file}"; then
+        log error "更新 inventory 文件失败"
+        rm -f "$temp_file"
+        exit 1
+    fi
+    
+    # 设置适当的权限
+    chmod 644 "${inventory_file}" || {
+        log error "设置 inventory 文件权限失败"
+        exit 1
+    }
+    
+    log info "inventory 配置更新成功"
+    return 0
+}
+
+# 修改 setup_kubernetes 函数，添加重置检查和更新 inventory
 function setup_kubernetes() {
     # 首先检查并重置已有的 Kubernetes 配置
     check_and_reset_kubernetes
+    
+    # 更新 inventory 配置
+    update_inventory || { log error "更新 inventory 配置失败"; exit 1; }
     
     # 创建必要目录
     mkdir -p /etc/kubez
