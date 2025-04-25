@@ -427,93 +427,159 @@ function check_memory() {
     log info "内存检查通过: 当前系统内存为 ${mem_total_gb}GB"
 }
 
-# 检查必要文件
-function check_files() {
-    local files=(
-        "${BASE_FILES_DIR}/k8s-centos7-v${KUBE_VERSION}_images.tar.gz"
-        "${BASE_FILES_DIR}/k8s-centos7-v${KUBE_VERSION}-rpm.tar.gz"
-        "${BASE_FILES_DIR}/kubez-ansible-offline-master.zip"
-        "${BASE_FILES_DIR}/nexus.tar.gz"
-        "${BASE_FILES_DIR}/others.tar.gz"
-        "${BASE_FILES_DIR}/image.tar.gz"
+# 添加检查 Harbor 相关文件的专门函数
+function check_harbor_files() {
+    log info "检查 Harbor 相关文件..."
+    
+    # 检查必要的 Harbor 文件
+    local harbor_files=(
+        "${OTHERS_DIR}/harbor/harbor.yml"
+        "${OTHERS_DIR}/harbor/install.sh"
+        "${OTHERS_DIR}/harbor/harbor.service"
+        "${OTHERS_DIR}/harbor/common.sh"
+        "${OTHERS_DIR}/harbor/prepare"
     )
 
-    # 检查目录是否干净
-    log info "检查目录是否干净"
-    local current_items=(${PKGPWD}/*)
-    local illegal_items=()
+    # 检查 others 目录是否存在，如果不存在则解压
+    if [ ! -d "${OTHERS_DIR}" ]; then
+        log info "解压 others.tar.gz..."
+        tar -zxvf "${BASE_FILES_DIR}/others.tar.gz" || { 
+            log error "解压 others.tar.gz 失败"
+            exit 1
+        }
+    fi
+
+    # 检查 harbor 目录是否存在
+    if [ ! -d "${OTHERS_DIR}/harbor" ]; then
+        log error "Harbor 目录不存在: ${OTHERS_DIR}/harbor"
+        exit 1
+    fi
+
+    # 检查每个必要文件
+    for file in "${harbor_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            log error "必要的 Harbor 文件不存在: $(basename ${file})"
+            exit 1
+        fi
+    done
+
+    log info "Harbor 文件检查完成"
+    return 0
+}
+
+# 修改原有的 check_files 函数
+function check_files() {
+    local check_all=$1  # 传入参数，true 表示检查所有文件，false 表示只检查 Harbor 相关文件
     
-    for current_item in "${current_items[@]}"; do
-        # 跳过当前脚本文件
-        if [ "$(basename ${current_item})" = "$(basename $0)" ]; then
-            continue
-        fi
+    if [ "$check_all" = true ]; then
+        log info "检查所有必要文件..."
         
-        # 检查是否为目录 - 目录在解压前应该不存在
-        if [ -d "${current_item}" ]; then
-            illegal_items+=("目录: $(basename ${current_item})")
-            continue
-        fi
+        # 定义所有可能需要的文件
+        local all_required_files=(
+            "${BASE_FILES_DIR}/k8s-centos7-v${KUBE_VERSION}_images.tar.gz"
+            "${BASE_FILES_DIR}/k8s-centos7-v${KUBE_VERSION}-rpm.tar.gz"
+            "${BASE_FILES_DIR}/kubez-ansible-offline-master.zip"
+            "${BASE_FILES_DIR}/nexus.tar.gz"
+            "${BASE_FILES_DIR}/others.tar.gz"
+            "${BASE_FILES_DIR}/image.tar.gz"
+        )
         
-        # 检查文件
-        local is_allowed_file=false
-        for allowed_file in "${files[@]}"; do
-            if [ "${current_item}" = "${allowed_file}" ]; then
-                is_allowed_file=true
-                break
+        # 检查所有必要文件是否存在
+        for file in "${all_required_files[@]}"; do
+            if [ ! -f "$file" ]; then
+                log error "必要文件不存在: $(basename ${file})"
+                exit 1
+            fi
+        done
+
+        # 检查目录状态
+        log info "检查目录..."
+        local current_items=(${PKGPWD}/*)
+        local illegal_items=()
+        
+        for current_item in "${current_items[@]}"; do
+            # 跳过当前脚本文件
+            if [ "$(basename ${current_item})" = "$(basename $0)" ]; then
+                continue
+            fi
+            
+            # 检查是否为目录 - 完整安装时所有目录都是非法的
+            if [ -d "${current_item}" ]; then
+                illegal_items+=("目录: $(basename ${current_item})")
+                continue
+            fi
+            
+            # 检查文件是否在允许列表中
+            local is_allowed_file=false
+            for allowed_file in "${all_required_files[@]}"; do
+                if [ "${current_item}" = "${allowed_file}" ]; then
+                    is_allowed_file=true
+                    break
+                fi
+            done
+            
+            if [ "$is_allowed_file" = false ]; then
+                illegal_items+=("文件: $(basename ${current_item})")
             fi
         done
         
-        if [ "$is_allowed_file" = false ]; then
-            illegal_items+=("文件: $(basename ${current_item})")
-        fi
-    done
-    
-    # 如果存在非法项目，一次性输出所有并退出
-    if [ ${#illegal_items[@]} -gt 0 ]; then
-        log error "发现以下非法项目:"
-        for illegal_item in "${illegal_items[@]}"; do
-            log error "  - ${illegal_item}"
-        done
-        log error "目录必须只包含必要的压缩包文件"
-        exit 1
-    fi
-    
-    log info "目录检查通过"
-
-    # 检查必要文件是否存在
-    for file in "${files[@]}"; do
-        if [ ! -f "$file" ]; then
-            log error "$(basename ${file}) 不存在"
+        # 处理非法项目
+        if [ ${#illegal_items[@]} -gt 0 ]; then
+            log error "发现以下非法项目:"
+            for illegal_item in "${illegal_items[@]}"; do
+                log error "  - ${illegal_item}"
+            done
+            log error "完整安装时目录必须只包含必要的压缩包文件"
             exit 1
         fi
-    done
-
-    # 解压others.tar.gz
-    if [ ! -d "${OTHERS_DIR}" ]; then
-        log info "解压 others.tar.gz..."
-        tar -zxvf "${BASE_FILES_DIR}/others.tar.gz" || { log error "解压 others.tar.gz 失败"; exit 1; }
+    else
+        log info "检查 Harbor 相关文件..."
+        
+        # 只检查 others 目录或 others.tar.gz 是否存在
+        if [ ! -d "${OTHERS_DIR}" ]; then
+            if [ ! -f "${BASE_FILES_DIR}/others.tar.gz" ]; then
+                log error "未找到 others 目录或 others.tar.gz"
+                exit 1
+            fi
+            
+            # 解压 others.tar.gz
+            log info "解压 others.tar.gz..."
+            tar -zxvf "${BASE_FILES_DIR}/others.tar.gz" || { 
+                log error "解压 others.tar.gz 失败"
+                exit 1
+            }
+        fi
     fi
 
-    # 检查others目录下的文件
-    local others_files=(
-        "${OTHERS_DIR}/prometheus-pv.yaml"
-        "${OTHERS_DIR}/prometheus.yaml"
-        "${OTHERS_DIR}/grafana-pv.yaml"
-        "${OTHERS_DIR}/grafana.yaml"
-        "${OTHERS_DIR}/install.sh"
-        "${OTHERS_DIR}/harbor"
-        "${OTHERS_DIR}/uni-virt"
+    # 检查 Harbor 相关文件
+    local harbor_files=(
+        "${OTHERS_DIR}/harbor/harbor.yml"
+        "${OTHERS_DIR}/harbor/install.sh"
+        "${OTHERS_DIR}/harbor/harbor.service"
+        "${OTHERS_DIR}/harbor/common.sh"
+        "${OTHERS_DIR}/harbor/prepare"
     )
 
-    for file in "${others_files[@]}"; do
-        if [ ! -e "${file}" ]; then
-            log error "$(basename ${file}) 不存在"
+    # 检查 harbor 目录是否存在
+    if [ ! -d "${OTHERS_DIR}/harbor" ]; then
+        log error "Harbor 目录不存在: ${OTHERS_DIR}/harbor"
+        exit 1
+    fi
+
+    # 检查每个 Harbor 必要文件
+    for file in "${harbor_files[@]}"; do
+        if [ ! -f "$file" ]; then
+            log error "必要的 Harbor 文件不存在: $(basename ${file})"
             exit 1
         fi
     done
 
-    log info "文件检查完成"
+    if [ "$check_all" = true ]; then
+        log info "所有文件检查完成"
+    else
+        log info "Harbor 文件检查完成"
+    fi
+    return 0
 }
 
 # 安装nexus
@@ -1144,29 +1210,62 @@ function install_docker_compose() {
     return 0
 }
 
-# 修改 install_harbor 函数，添加 docker-compose 安装步骤
+# 添加清理 Harbor 数据的专门函数
+function cleanup_harbor_data() {
+    log info "清理 Harbor 相关数据..."
+    
+    # 停止 Harbor 服务
+    if systemctl is-active harbor &>/dev/null; then
+        log info "停止 Harbor 服务"
+        systemctl stop harbor
+        systemctl disable harbor
+        rm -f /etc/systemd/system/harbor.service
+        systemctl daemon-reload
+    fi
+
+    # 清理 Harbor 容器和镜像
+    if command -v docker &>/dev/null; then
+        log info "清理 Harbor 相关容器"
+        # 停止并删除所有 goharbor 容器
+        docker ps -a | grep 'goharbor' | awk '{print $1}' | xargs -r docker rm -f
+        
+        # 删除 Harbor 相关网络
+        docker network ls | grep 'harbor' | awk '{print $1}' | xargs -r docker network rm
+    fi
+
+    # 需要清理的 Harbor 相关目录
+    local harbor_dirs=(
+        "/data/harbor"
+        "/data/registry"
+        "/data/database"
+        "/data/redis"
+        "/data/secret"
+        "/var/log/harbor"
+        "/usr/local/harbor"
+    )
+
+    # 清理 Harbor 相关目录
+    for dir in "${harbor_dirs[@]}"; do
+        if [ -d "$dir" ]; then
+            log info "清理目录: $dir"
+            rm -rf "$dir" || log error "清理 $dir 失败，继续处理其他目录"
+        fi
+    done
+
+    log info "Harbor 数据清理完成"
+}
+
+# 修改 install_harbor 函数，在开始时调用清理函数
 function install_harbor() {
     log info "安装 Harbor"
     
     # 首先安装 docker-compose
     install_docker_compose || { log error "安装 docker-compose 失败"; exit 1; }
     
+    # 清理旧的 Harbor 数据
+    cleanup_harbor_data || { log error "清理 Harbor 数据失败"; exit 1; }
+    
     cd "${OTHERS_DIR}/harbor" || { log error "进入harbor目录失败"; exit 1; }
-
-    # Stop and clean up existing Harbor installation
-    if systemctl is-active harbor &>/dev/null; then
-        log info "停止现有 Harbor 服务"
-        systemctl stop harbor
-        sleep 10
-    fi
-
-    if [ -d "/usr/local/harbor" ]; then
-        log info "清理旧的 Harbor 安装"
-        cd /usr/local/harbor
-        docker-compose down -v || true
-        cd "${OTHERS_DIR}/harbor"
-        rm -rf /usr/local/harbor
-    fi
 
     # 创建必要的目录
     mkdir -p /var/log/harbor /data/registry /data/database /data/redis || { log error "创建必要目录失败"; exit 1; }
@@ -1180,26 +1279,43 @@ function install_harbor() {
     # 进入目标目录进行配置
     cd /usr/local/harbor || { log error "进入/usr/local/harbor目录失败"; exit 1; }
     
-    # # 配置 Harbor
-    # if [ -f "harbor.yml" ]; then
-    #     log info "删除旧的harbor.yml"
-    #     rm -f harbor.yml
-    # fi
-    # cp -f harbor.yml.tmpl harbor.yml || { log error "复制harbor配置文件失败"; exit 1; }
-    # sed -i "s/hostname: reg.mydomain.com/hostname: ${IP_ADDRESS}/g" harbor.yml
-    sed -i "/^http:/,/^[^[:space:]]/{s/^  port: 8080/  port: ${HARBOR_PORT}/}" harbor.yml
+    # 配置 harbor.yml
+    log info "配置 harbor.yml"
+    if [ -f "harbor.yml" ]; then
+        # 备份原配置文件
+        cp -f harbor.yml "harbor.yml.bak.$(date +%Y%m%d_%H%M%S)" || log info "无需备份原配置文件"
+    else
+        # 如果不存在则从模板创建
+        cp -f harbor.yml.tmpl harbor.yml || { log error "创建harbor.yml失败"; exit 1; }
+    fi
+
+    # 修改配置文件
+    log info "更新 harbor.yml 配置..."
     
-    # # 注释掉 https 部分（包括其下所有缩进的配置）
-    # sed -i '/^https:/,/^[^[:space:]]/s/^\([[:space:]]*[^#]\)/#\1/g' harbor.yml
+    # 修改 hostname
+    sed -i "s/^hostname: .*/hostname: ${IP_ADDRESS}/" harbor.yml || {
+        log error "修改 hostname 失败"
+        exit 1
+    }
+    
+    # 修改端口
+    sed -i "/^http:/,/^[^[:space:]]/{s/port: .*/port: ${HARBOR_PORT}/}" harbor.yml || {
+        log error "修改端口失败"
+        exit 1
+    }
+    
+    # 注释掉 https 部分
+    sed -i '/^https:/,/^[^[:space:]]/s/^[[:space:]]*[^#]/#&/' harbor.yml || {
+        log error "注释 https 配置失败"
+        exit 1
+    }
 
-
-
-    # Install Harbor
+    # 安装 Harbor
+    log info "开始安装 Harbor..."
     ./install.sh || { log error "安装Harbor失败"; exit 1; }
 
     # 配置并启动服务
     cp harbor.service /etc/systemd/system/ || { log error "复制harbor.service失败"; exit 1; }
-
     
     # 重新加载 systemd 配置
     systemctl daemon-reload || { log error "重新加载systemd配置失败"; exit 1; }
@@ -1257,19 +1373,35 @@ function get_node_hostname() {
     return 0
 }
 
+# 添加一个辅助函数来查找 UniVirt 目录
+function find_univirt_dir() {
+    local base_dir="$1"
+    local possible_names=("uniVirt" "uni-virt" "univirt")
+    
+    for name in "${possible_names[@]}"; do
+        if [ -d "${base_dir}/${name}" ]; then
+            echo "${base_dir}/${name}"
+            return 0
+        fi
+    done
+    
+    # 如果都没找到，返回默认名称（用于错误消息）
+    echo "${base_dir}/uni-virt"
+    return 1
+}
+
 # 修改 setup_univirt_inventory 函数
 function setup_univirt_inventory() {
-    local target_dir="${OTHERS_DIR}/uni-virt"
+    local univirt_dir=$(find_univirt_dir "${OTHERS_DIR}")
     local inventory_file="inventory.ini"
-    local full_path="${target_dir}/${inventory_file}"
+    local full_path="${univirt_dir}/${inventory_file}"
     
-    log info "配置 UniVirt 的 inventory 文件: ${full_path}"
-    
-    # 检查目标目录是否存在
-    if [ ! -d "${target_dir}" ]; then
-        log error "UniVirt 目录不存在: ${target_dir}"
+    if [ ! -d "${univirt_dir}" ]; then
+        log error "UniVirt 目录不存在: ${univirt_dir}"
         exit 1
     fi
+    
+    log info "配置 UniVirt 的 inventory 文件: ${full_path}"
     
     # 获取节点标识（hostname 或 IP）
     local node_identifier=$(get_node_hostname "${IP_ADDRESS}")
@@ -1342,8 +1474,14 @@ function install_uni_virt() {
     log info "检查 Kubernetes 集群状态"
     check_kubernetes_ready
     
-    log info "安装 uni-virt，版本: ${UNIVIRT_VERSION}"
-    cd "${OTHERS_DIR}/uni-virt" || { log error "进入uni-virt目录失败"; exit 1; }
+    local univirt_dir=$(find_univirt_dir "${OTHERS_DIR}")
+    if [ ! -d "${univirt_dir}" ]; then
+        log error "UniVirt 目录不存在: ${univirt_dir}"
+        exit 1
+    fi
+    
+    log info "安装 UniVirt，版本: ${UNIVIRT_VERSION}"
+    cd "${univirt_dir}" || { log error "进入 UniVirt 目录失败"; exit 1; }
 
     # 配置 inventory 文件
     setup_univirt_inventory || { log error "配置 inventory 失败"; exit 1; }
@@ -1363,10 +1501,21 @@ function install_uni_virt() {
         exit 1; 
     }
     
-    ansible-playbook -i inventory.ini scripts/ansible/playbooks/label_k8s_nodes.yml || { 
-        log error "节点打标签失败"; 
-        exit 1; 
-    }
+    # 检查并删除已存在的标签
+    log info "检查并更新节点标签..."
+    local node_name=$(kubectl get nodes -o name | head -n 1)
+    if [ -n "$node_name" ]; then
+        # 尝试删除已存在的标签
+        kubectl label node ${node_name#node/} doslab/virt.tool.centos- --overwrite=true || true
+        # 重新添加标签
+        kubectl label node ${node_name#node/} doslab/virt.tool.centos="" --overwrite=true || {
+            log error "更新节点标签失败"
+            exit 1
+        }
+    else
+        log error "未找到可用的节点"
+        exit 1
+    fi
 
     # 使用环境变量中的版本
     log info "打包镜像，使用版本: ${UNIVIRT_VERSION}"
@@ -1376,7 +1525,7 @@ function install_uni_virt() {
     }
     
     ansible-playbook -i localhost -e "ver=${UNIVIRT_VERSION} offline=1" scripts/ansible/playbooks/install_uniVirt.yml || { 
-        log error "安装uni-virt失败"; 
+        log error "安装 UniVirt 失败"; 
         exit 1; 
     }
     
@@ -1479,17 +1628,11 @@ function show_help() {
 function cleanup_old_data() {
     log info "检查并清理旧的配置和数据..."
     
-    # 需要清理的目录列表
+    # 需要清理的非 Harbor 相关目录
     local dirs_to_clean=(
         "/data/nexus_local"
-        "/data/harbor"
-        "/data/registry"
-        "/data/database"
-        "/data/redis"
         "/data/prometheus"
         "/data/grafana"
-        "/data/secret"
-        "/var/log/harbor"
     )
 
     # 检查并清理每个目录
@@ -1500,32 +1643,129 @@ function cleanup_old_data() {
         fi
     done
 
-    # 清理 Harbor 相关配置
-    if [ -d "/usr/local/harbor" ]; then
-        log info "清理 Harbor 配置目录"
-        rm -rf /usr/local/harbor || { log error "清理 Harbor 配置目录失败"; exit 1; }
-    fi
-
-    # 停止并清理 Harbor 服务
-    if systemctl is-active harbor &>/dev/null; then
-        log info "停止 Harbor 服务"
-        systemctl stop harbor
-        systemctl disable harbor
-        rm -f /etc/systemd/system/harbor.service
-        systemctl daemon-reload
-    fi
-
-    # 清理 Docker 容器和网络
-    if command -v docker &>/dev/null; then
-        log info "清理 Docker 资源"
-        docker ps -a | grep 'harbor' | awk '{print $1}' | xargs -r docker rm -f
-        docker network ls | grep 'harbor' | awk '{print $1}' | xargs -r docker network rm
-    fi
-
     log info "旧数据清理完成"
 }
 
-# 在主函数中添加调用
+# 添加检查 Docker 运行状态的函数
+function check_docker_running() {
+    log info "检查 Docker 运行状态..."
+    
+    # 检查 docker 命令是否存在
+    if ! command -v docker &>/dev/null; then
+        log error "Docker 未安装"
+        return 1
+    fi
+    
+    # 检查 Docker 守护进程是否运行
+    if ! systemctl is-active docker &>/dev/null; then
+        log error "Docker 服务未运行"
+        return 1
+    fi
+
+    # 验证 Docker 是否可用
+    if ! docker info &>/dev/null; then
+        log error "Docker 服务无法正常通信"
+        return 1
+    fi
+
+    log info "Docker 运行正常"
+    return 0
+}
+
+# 添加检查 Ansible 的函数
+function check_ansible_installed() {
+    log info "检查 Ansible 是否已安装..."
+    
+    if ! command -v ansible &>/dev/null; then
+        log error "Ansible 未安装"
+        return 1
+    fi
+    
+    if ! command -v ansible-playbook &>/dev/null; then
+        log error "ansible-playbook 命令未找到"
+        return 1
+    fi
+
+    log info "Ansible 已安装"
+    return 0
+}
+
+# 添加检查集群通信的函数
+function check_cluster_communication() {
+    log info "检查集群通信状态..."
+    
+    # 检查 kubectl 命令
+    if ! command -v kubectl &>/dev/null; then
+        log error "kubectl 未安装"
+        return 1
+    fi
+    
+    # 检查集群连接
+    if ! kubectl cluster-info &>/dev/null; then
+        log error "无法连接到 Kubernetes 集群"
+        return 1
+    fi
+    
+    # 检查节点状态
+    if ! kubectl get nodes &>/dev/null; then
+        log error "无法获取集群节点信息"
+        return 1
+    fi
+    
+    # 检查所有节点是否就绪
+    local not_ready_nodes=$(kubectl get nodes --no-headers | grep -v "Ready" | wc -l)
+    if [ "$not_ready_nodes" -gt 0 ]; then
+        log error "存在未就绪的节点"
+        kubectl get nodes
+        return 1
+    fi
+
+    log info "集群通信正常"
+    return 0
+}
+
+# 添加综合检查函数
+function check_prerequisites() {
+    local check_type="$1"
+    local check_failed=0
+    
+    case "$check_type" in
+        "harbor")
+            log info "执行 Harbor 安装前检查..."
+            if ! check_docker_running; then
+                check_failed=1
+            fi
+            ;;
+            
+        "univirt"|"monitoring")
+            log info "执行 ${check_type} 安装前检查..."
+            if ! check_docker_running; then
+                check_failed=1
+            fi
+            if ! check_ansible_installed; then
+                check_failed=1
+            fi
+            if ! check_cluster_communication; then
+                check_failed=1
+            fi
+            ;;
+            
+        *)
+            log error "未知的检查类型: ${check_type}"
+            return 1
+            ;;
+    esac
+    
+    if [ $check_failed -eq 1 ]; then
+        log error "${check_type} 安装前检查失败"
+        return 1
+    fi
+    
+    log info "${check_type} 安装前检查通过"
+    return 0
+}
+
+# 修改 main 函数中的安装分支
 function main() {
     case "$1" in
         "install")
@@ -1540,8 +1780,8 @@ function main() {
                     log info "开始完整安装..."
                     init_env
                     check_ports_availability
+                    check_files true     # 检查所有文件
                     cleanup_old_data
-                    check_files
                     install_nexus
                     process_materials
                     install_kubez_ansible
@@ -1558,8 +1798,9 @@ function main() {
                 "harbor")
                     log info "开始安装 Harbor..."
                     init_env
+                    check_prerequisites "harbor" || { log error "Harbor 安装前检查失败"; exit 1; }
                     check_ports_availability
-                    cleanup_old_data
+                    check_files false    # 只检查 Harbor 相关文件
                     install_harbor
                     log info "Harbor 安装完成"
                     ;;
@@ -1567,7 +1808,7 @@ function main() {
                 "monitoring")
                     log info "开始安装监控组件..."
                     init_env
-                    # 确保必要目录存在
+                    check_prerequisites "monitoring" || { log error "监控组件安装前检查失败"; exit 1; }
                     mkdir -p /data/prometheus /data/grafana
                     install_monitoring
                     log info "监控组件安装完成"
@@ -1576,6 +1817,7 @@ function main() {
                 "univirt")
                     log info "开始安装 UniVirt..."
                     init_env
+                    check_prerequisites "univirt" || { log error "UniVirt 安装前检查失败"; exit 1; }
                     install_uni_virt
                     log info "UniVirt 安装完成"
                     ;;
