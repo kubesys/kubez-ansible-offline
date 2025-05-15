@@ -144,16 +144,16 @@ function check_system_version() {
     # 根据不同版本输出特定的警告或建议
     case "$detected_version" in
         "CentOS Linux release 7.9")
-            log info "检测到最新的 CentOS 7.9 版本，推荐使用此版本"
+#            log info "检测到最新的 CentOS 7.9 版本，推荐使用此版本"
             ;;
         "CentOS Linux release 7.8")
-            log info "警告: CentOS 7.8 版本可能存在已知安全漏洞，建议升级到 7.9"
+#            log info "警告: CentOS 7.8 版本可能存在已知安全漏洞，建议升级到 7.9"
             ;;
         "CentOS Linux release 7.7")
-            log info "警告: CentOS 7.7 版本较旧，建议升级到 7.9"
+#            log info "警告: CentOS 7.7 版本较旧，建议升级到 7.9"
             ;;
         "CentOS Linux release 7.6")
-            log info "警告: CentOS 7.6 版本过旧，强烈建议升级到 7.9"
+#            log info "警告: CentOS 7.6 版本过旧，强烈建议升级到 7.9"
             ;;
     esac
     
@@ -1889,4 +1889,6 @@ if [ "$1" = "install" ]; then
 fi
 
 # 执行主程序
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
