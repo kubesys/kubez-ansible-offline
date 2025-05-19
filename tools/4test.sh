@@ -91,7 +91,6 @@ function check_system_version() {
     local supported_versions=(
         "CentOS Linux release 7.9"
         "CentOS Linux release 7.8"
-        "CentOS Linux release 7.7"
         "CentOS Linux release 7.6"
     )
     
@@ -148,9 +147,6 @@ function check_system_version() {
             ;;
         "CentOS Linux release 7.8")
 #            log info "警告: CentOS 7.8 版本可能存在已知安全漏洞，建议升级到 7.9"
-            ;;
-        "CentOS Linux release 7.7")
-#            log info "警告: CentOS 7.7 版本较旧，建议升级到 7.9"
             ;;
         "CentOS Linux release 7.6")
 #            log info "警告: CentOS 7.6 版本过旧，强烈建议升级到 7.9"
@@ -1549,49 +1545,10 @@ function destroy_kubernetes() {
     log info "开始卸载 Kubernetes 集群"
     
     # 执行 kubez-ansible destroy
-    kubez-ansible destroy --yes-i-really-really-mean-it || { log error "卸载 Kubernetes 集群失败"; exit 1; }
-    
-    # 清理 CNI 配置
-    log info "清理 CNI 配置"
-    rm -rf /etc/cni/net.d/* || log error "清理 CNI 配置失败"
-    
-    # 清理网络接口
-    log info "清理网络接口"
-    ip link delete cni0 2>/dev/null || true
-    ip link delete flannel.1 2>/dev/null || true
-    
-    # 清理 IPVS 表
-    log info "清理 IPVS 表"
-    if command -v ipvsadm >/dev/null 2>&1; then
-        ipvsadm --clear || log error "清理 IPVS 表失败"
-    fi
-    
-    # 清理 iptables 规则
-    log info "清理 iptables 规则"
-    iptables -F || log error "清理 iptables 规则失败"
-    iptables -X || log error "删除自定义 iptables 链失败"
-    iptables -t nat -F || log error "清理 NAT 表失败"
-    iptables -t nat -X || log error "删除自定义 NAT 链失败"
-    iptables -t mangle -F || log error "清理 mangle 表失败"
-    iptables -t mangle -X || log error "删除自定义 mangle 链失败"
-    
-    # 清理 kubeconfig
-    log info "清理 kubeconfig 文件"
-    rm -rf $HOME/.kube/config || log error "清理 kubeconfig 失败"
-    rm -rf /etc/kubernetes/* || log error "清理 kubernetes 配置文件失败"
-    
-    # 停止并禁用相关服务
-    log info "停止并禁用相关服务"
-    systemctl stop kubelet docker containerd haproxy keepalived 2>/dev/null || true
-    systemctl disable kubelet docker containerd haproxy keepalived 2>/dev/null || true
-    
-    # 清理目录
-    log info "清理相关目录"
-    rm -rf /var/lib/kubelet/
-    rm -rf /var/lib/docker/
-    rm -rf /var/lib/containerd/
-    rm -rf /var/lib/etcd/
-    rm -rf /var/log/pods/
+    kubez-ansible destroy --yes-i-really-really-mean-it || { 
+        log error "卸载 Kubernetes 集群失败"; 
+        exit 1; 
+    }
     
     log info "Kubernetes 集群卸载完成"
 }
@@ -1831,7 +1788,7 @@ function main() {
             ;;
             
         "destroy")
-            init_env
+            # init_env
             run_kubez_ansible "destroy" "--yes-i-really-really-mean-it"
             log info "集群已成功卸载"
             ;;

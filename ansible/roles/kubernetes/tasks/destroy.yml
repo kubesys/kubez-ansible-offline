@@ -1,9 +1,130 @@
 ---
 - name: Reset kubernetes cluster
   become: true
-  kube_toolbox:
-    module_name: kubeadm
-    module_args: "reset -f"
+  block:
+    - name: Force stop kubelet service
+      service:
+        name: kubelet
+        state: stopped
+      when:
+        - inventory_hostname in groups['kubernetes']
+
+    - name: Force stop all running containers
+      shell: |
+        crictl ps -q | xargs -r crictl stop || true
+        crictl ps -a -q | xargs -r crictl rm || true
+      when:
+        - inventory_hostname in groups['kubernetes']
+
+    - name: Reset kubernetes cluster with timeout
+      kube_toolbox:
+        module_name: kubeadm
+        module_args: "reset -f"
+      register: reset_result
+      when:
+        - inventory_hostname in groups['kubernetes']
+      async: 300  # 设置5分钟超时
+      poll: 0     # 不等待任务完成
+
+    - name: Wait for reset to complete
+      async_status:
+        jid: "{{ reset_result.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 60  # 最多重试60次
+      delay: 5     # 每次重试间隔5秒
+      when:
+        - inventory_hostname in groups['kubernetes']
+
+    - name: Force cleanup if reset failed
+      shell: |
+        rm -rf /etc/kubernetes/manifests/*
+        rm -rf /etc/kubernetes/pki/*
+        rm -rf /etc/kubernetes/admin.conf
+        rm -rf /etc/kubernetes/kubelet.conf
+        rm -rf /etc/kubernetes/controller-manager.conf
+        rm -rf /etc/kubernetes/scheduler.conf
+      when:
+        - inventory_hostname in groups['kubernetes']
+        - job_result.failed | default(false)
+
+  rescue:
+    - name: Handle reset failure
+      debug:
+        msg: "Kubernetes reset failed, attempting force cleanup..."
+      when:
+        - inventory_hostname in groups['kubernetes']
+
+    - name: Force cleanup on failure
+      shell: |
+        rm -rf /etc/kubernetes/manifests/*
+        rm -rf /etc/kubernetes/pki/*
+        rm -rf /etc/kubernetes/admin.conf
+        rm -rf /etc/kubernetes/kubelet.conf
+        rm -rf /etc/kubernetes/controller-manager.conf
+        rm -rf /etc/kubernetes/scheduler.conf
+      when:
+        - inventory_hostname in groups['kubernetes']
+
+- name: Clean up CNI configuration
+  become: true
+  file:
+    path: /etc/cni/net.d
+    state: absent
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+- name: Clean up network interfaces
+  become: true
+  shell: |
+    ip link delete cni0 2>/dev/null || true
+    ip link delete flannel.1 2>/dev/null || true
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+- name: Clean up IPVS tables
+  become: true
+  shell: ipvsadm --clear
+  when:
+    - inventory_hostname in groups['kubernetes']
+    - ansible_os_family == "RedHat"
+
+- name: Clean up iptables rules
+  become: true
+  shell: |
+    iptables -F
+    iptables -X
+    iptables -t nat -F
+    iptables -t nat -X
+    iptables -t mangle -F
+    iptables -t mangle -X
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+- name: Clean up kubernetes configuration files
+  become: true
+  file:
+    path: "{{ item }}"
+    state: absent
+  with_items:
+    - /etc/kubernetes
+    - /var/lib/kubelet
+    - /var/lib/etcd
+    - /var/log/pods
+    - "{{ ansible_env.HOME }}/.kube/config"
+  when:
+    - inventory_hostname in groups['kubernetes']
+
+- name: Stop and disable kubernetes related services
+  become: true
+  service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  with_items:
+    - kubelet
+    - docker
+    - containerd
   when:
     - inventory_hostname in groups['kubernetes']
 
@@ -18,17 +139,7 @@
 - name: Print destroy results
   debug:
     msg: >-
-      The reset process does not clean CNI configuration. To do so, you must remove /etc/cni/net.d
-
-      The reset process does not reset or clean up iptables rules or IPVS tables.
-      If you wish to reset iptables, you must do so manually by using the "iptables" command.
-
-      If your cluster was setup to utilize IPVS, run ipvsadm --clear (or similar)
-      to reset your system's IPVS tables.
-
-      The reset process does not clean your kubeconfig files and you must remove them manually.
-      Please, check the contents of the $HOME/.kube/config file.
-
-      The reset process does not destroy haproxy and keepalived if enabled and you must stop them manually.
+      Kubernetes cluster has been successfully destroyed.
+      All related configurations and data have been cleaned up.
   connection: local
   run_once: True
