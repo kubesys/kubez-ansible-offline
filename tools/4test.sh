@@ -990,16 +990,19 @@ function update_inventory() {
         exit 1
     fi
     
+    # 使用 get_node_hostname 函数获取节点标识
+    local node_identifier=$(get_node_hostname "${IP_ADDRESS}")
+    
     # 创建临时文件
     local temp_file="${inventory_file}.tmp"
     
     # 生成新的 inventory 内容
     {
         echo "[docker-master]"
-        echo "localhost       ansible_connection=local"
+        echo "${node_identifier}       ansible_connection=local"
         echo ""
         echo "[docker-node]"
-        echo "localhost       ansible_connection=local"
+        echo "${node_identifier}       ansible_connection=local"
         echo ""
         echo "[containerd-master]"
         echo ""
@@ -1014,7 +1017,7 @@ function update_inventory() {
         echo "containerd-node"
         echo ""
         echo "[storage]"
-        echo "localhost       ansible_connection=local"
+        echo "${node_identifier}       ansible_connection=local"
         echo ""
         echo "[baremetal:children]"
         echo "kube-master"
@@ -1359,12 +1362,18 @@ function get_node_hostname() {
     hostname=$(hostname)
     
     # 检查获取到的 hostname 是否有效
-    if [ -n "$hostname" ]; then
+    if [ -n "$hostname" ] && \
+       [ "$hostname" != "localhost" ] && \
+       [ "$hostname" != "localhost.localdomain" ] && \
+       [ "$hostname" != "127.0.0.1" ] && \
+       [ "$hostname" != "::1" ]; then
+        log info "使用有效的hostname: ${hostname}"
         echo "$hostname"
         return 0
     fi
     
     # 如果没有有效的 hostname，返回 IP 地址
+    log info "未检测到有效的hostname，使用IP地址: ${ip}"
     echo "$ip"
     return 0
 }
@@ -1399,10 +1408,6 @@ function setup_univirt_inventory() {
     
     log info "配置 UniVirt 的 inventory 文件: ${full_path}"
     
-    # 获取节点标识（hostname 或 IP）
-    local node_identifier=$(get_node_hostname "${IP_ADDRESS}")
-    log info "使用节点标识: ${node_identifier}"
-    
     # 如果目标文件存在，创建备份
     if [ -f "${full_path}" ]; then
         local backup_file="${full_path}.bak.$(date +%Y%m%d_%H%M%S)"
@@ -1416,24 +1421,42 @@ function setup_univirt_inventory() {
     # 创建临时文件
     local temp_file="${full_path}.tmp"
     
-    # 使用节点标识更新 inventory 内容
+    # 使用节点配置生成 inventory 内容
     {
         # master 部分
         echo "[master] # 主节点组"
         echo "# 填节点hostname，即IP地址"
-        echo "${node_identifier}"
+        if [ -f "${NODE_CONFIG_FILE}" ]; then
+            # 多节点模式：从配置文件读取master节点
+            grep -A10 "^\[docker-master\]" "${NODE_CONFIG_FILE}" | grep -v "^\[" | grep -v "^$" | awk '{print $1}'
+        else
+            # 单节点模式：使用当前节点
+            get_node_hostname
+        fi
         echo ""
         
         # worker 部分
         echo "[worker] # 计算节点组"
         echo "# 填节点hostname，即IP地址"
-        echo "${node_identifier}"
+        if [ -f "${NODE_CONFIG_FILE}" ]; then
+            # 多节点模式：从配置文件读取worker节点
+            grep -A10 "^\[docker-node\]" "${NODE_CONFIG_FILE}" | grep -v "^\[" | grep -v "^$" | awk '{print $1}'
+        else
+            # 单节点模式：使用当前节点
+            get_node_hostname
+        fi
         echo ""
         
         # chrony 部分
         echo "[chrony] # 时间服务器，只设置1台"
         echo "# 填节点hostname，即IP地址"
-        echo "${node_identifier}"
+        if [ -f "${NODE_CONFIG_FILE}" ]; then
+            # 多节点模式：使用第一个master节点作为时间服务器
+            grep -A10 "^\[docker-master\]" "${NODE_CONFIG_FILE}" | grep -v "^\[" | grep -v "^$" | head -n 1 | awk '{print $1}'
+        else
+            # 单节点模式：使用当前节点
+            get_node_hostname
+        fi
     } > "$temp_file"
     
     # 检查临时文件是否创建成功
@@ -1456,12 +1479,6 @@ function setup_univirt_inventory() {
     }
     
     log info "成功更新 UniVirt 的 inventory 文件: ${full_path}"
-    if [ "${node_identifier}" != "${IP_ADDRESS}" ]; then
-        log info "使用 hostname: ${node_identifier} 替代 IP: ${IP_ADDRESS}"
-    else
-        log info "未找到有效的 hostname，使用 IP 地址: ${IP_ADDRESS}"
-    fi
-    
     return 0
 }
 
@@ -1482,9 +1499,16 @@ function install_uni_virt() {
     # 配置 inventory 文件
     setup_univirt_inventory || { log error "配置 inventory 失败"; exit 1; }
 
-    # 获取节点信息（使用配置的IP地址）
-    MASTER_NODE="${IP_ADDRESS}"
-    WORKER_NODES="${IP_ADDRESS}"
+    # 获取节点信息
+    if [ -f "${NODE_CONFIG_FILE}" ]; then
+        # 多节点模式：从配置文件读取节点信息
+        MASTER_NODE=$(grep -A10 "^\[docker-master\]" "${NODE_CONFIG_FILE}" | grep -v "^\[" | grep -v "^$" | head -n 1 | awk '{print $1}')
+        WORKER_NODES=$(grep -A10 "^\[docker-node\]" "${NODE_CONFIG_FILE}" | grep -v "^\[" | grep -v "^$" | awk '{print $1}' | tr '\n' ',')
+    else
+        # 单节点模式：使用当前节点
+        MASTER_NODE=$(get_node_hostname)
+        WORKER_NODES="${MASTER_NODE}"
+    fi
 
     # 安装步骤
     ansible-playbook -i inventory.ini -e "offline=1" scripts/ansible/playbooks/install_packages_and_dependencies.yml || { 
@@ -1497,17 +1521,20 @@ function install_uni_virt() {
         exit 1; 
     }
     
-    # 检查并删除已存在的标签
+    # 检查并更新所有节点的标签
     log info "检查并更新节点标签..."
-    local node_name=$(kubectl get nodes -o name | head -n 1)
-    if [ -n "$node_name" ]; then
-        # 尝试删除已存在的标签
-        kubectl label node ${node_name#node/} doslab/virt.tool.centos- --overwrite=true || true
-        # 重新添加标签
-        kubectl label node ${node_name#node/} doslab/virt.tool.centos="" --overwrite=true || {
-            log error "更新节点标签失败"
-            exit 1
-        }
+    local nodes=$(kubectl get nodes -o name)
+    if [ -n "$nodes" ]; then
+        for node in $nodes; do
+            node_name=${node#node/}
+            # 尝试删除已存在的标签
+            kubectl label node ${node_name} doslab/virt.tool.centos- --overwrite=true || true
+            # 重新添加标签
+            kubectl label node ${node_name} doslab/virt.tool.centos="" --overwrite=true || {
+                log error "更新节点 ${node_name} 标签失败"
+                exit 1
+            }
+        done
     else
         log error "未找到可用的节点"
         exit 1
