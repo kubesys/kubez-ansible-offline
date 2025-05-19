@@ -1542,14 +1542,12 @@ function install_uni_virt() {
 
 # 卸载kubernetes集群
 function destroy_kubernetes() {
-    log info "开始卸载 Kubernetes 集群"
-    
-    # 执行 kubez-ansible destroy
-    kubez-ansible destroy --yes-i-really-really-mean-it || { 
+    local inventory_file="${1:-${ALL_IN_ONE:-/usr/share/kubez-ansible/ansible/inventory/all-in-one}}"
+    log info "开始卸载 Kubernetes 集群，inventory: $inventory_file"
+    kubez-ansible -i "$inventory_file" destroy --yes-i-really-really-mean-it || { 
         log error "卸载 Kubernetes 集群失败"; 
         exit 1; 
     }
-    
     log info "Kubernetes 集群卸载完成"
 }
 
@@ -1788,8 +1786,7 @@ function main() {
             ;;
             
         "destroy")
-            # init_env
-            run_kubez_ansible "destroy" "--yes-i-really-really-mean-it"
+            destroy_kubernetes
             log info "集群已成功卸载"
             ;;
         "help"|"-h"|"--help")
