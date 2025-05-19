@@ -23,7 +23,7 @@
       register: reset_result
       when:
         - inventory_hostname in groups['kubernetes']
-      async: 300  # 设置5分钟超时
+      async: 180  # 设置3分钟超时
       poll: 0     # 不等待任务完成
 
     - name: Wait for reset to complete
@@ -31,22 +31,10 @@
         jid: "{{ reset_result.ansible_job_id }}"
       register: job_result
       until: job_result.finished
-      retries: 60  # 最多重试60次
+      retries: 36  # 最多重试36次
       delay: 5     # 每次重试间隔5秒
       when:
         - inventory_hostname in groups['kubernetes']
-
-    - name: Force cleanup if reset failed
-      shell: |
-        rm -rf /etc/kubernetes/manifests/*
-        rm -rf /etc/kubernetes/pki/*
-        rm -rf /etc/kubernetes/admin.conf
-        rm -rf /etc/kubernetes/kubelet.conf
-        rm -rf /etc/kubernetes/controller-manager.conf
-        rm -rf /etc/kubernetes/scheduler.conf
-      when:
-        - inventory_hostname in groups['kubernetes']
-        - job_result.failed | default(false)
 
   rescue:
     - name: Handle reset failure
@@ -55,86 +43,78 @@
       when:
         - inventory_hostname in groups['kubernetes']
 
-    - name: Force cleanup on failure
-      shell: |
-        rm -rf /etc/kubernetes/manifests/*
-        rm -rf /etc/kubernetes/pki/*
-        rm -rf /etc/kubernetes/admin.conf
-        rm -rf /etc/kubernetes/kubelet.conf
-        rm -rf /etc/kubernetes/controller-manager.conf
-        rm -rf /etc/kubernetes/scheduler.conf
+- name: Clean up all kubernetes related files and services
+  become: true
+  block:
+    - name: Clean up CNI configuration
+      file:
+        path: /etc/cni/net.d
+        state: absent
       when:
         - inventory_hostname in groups['kubernetes']
 
-- name: Clean up CNI configuration
-  become: true
-  file:
-    path: /etc/cni/net.d
-    state: absent
-  when:
-    - inventory_hostname in groups['kubernetes']
+    - name: Clean up network interfaces
+      shell: |
+        ip link delete cni0 2>/dev/null || true
+        ip link delete flannel.1 2>/dev/null || true
+      when:
+        - inventory_hostname in groups['kubernetes']
 
-- name: Clean up network interfaces
-  become: true
-  shell: |
-    ip link delete cni0 2>/dev/null || true
-    ip link delete flannel.1 2>/dev/null || true
-  when:
-    - inventory_hostname in groups['kubernetes']
+    - name: Clean up IPVS tables
+      shell: ipvsadm --clear
+      when:
+        - inventory_hostname in groups['kubernetes']
+        - ansible_os_family == "RedHat"
 
-- name: Clean up IPVS tables
-  become: true
-  shell: ipvsadm --clear
-  when:
-    - inventory_hostname in groups['kubernetes']
-    - ansible_os_family == "RedHat"
+    - name: Clean up iptables rules
+      shell: |
+        iptables -F
+        iptables -X
+        iptables -t nat -F
+        iptables -t nat -X
+        iptables -t mangle -F
+        iptables -t mangle -X
+      when:
+        - inventory_hostname in groups['kubernetes']
 
-- name: Clean up iptables rules
-  become: true
-  shell: |
-    iptables -F
-    iptables -X
-    iptables -t nat -F
-    iptables -t nat -X
-    iptables -t mangle -F
-    iptables -t mangle -X
-  when:
-    - inventory_hostname in groups['kubernetes']
+    - name: Clean up kubernetes configuration files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - /etc/kubernetes
+        - /var/lib/kubelet
+        - /var/lib/etcd
+        - /var/log/pods
+        - "{{ ansible_env.HOME }}/.kube/config"
+      when:
+        - inventory_hostname in groups['kubernetes']
 
-- name: Clean up kubernetes configuration files
-  become: true
-  file:
-    path: "{{ item }}"
-    state: absent
-  with_items:
-    - /etc/kubernetes
-    - /var/lib/kubelet
-    - /var/lib/etcd
-    - /var/log/pods
-    - "{{ ansible_env.HOME }}/.kube/config"
-  when:
-    - inventory_hostname in groups['kubernetes']
+    - name: Stop and disable kubernetes related services
+      service:
+        name: "{{ item }}"
+        state: stopped
+        enabled: no
+      with_items:
+        - kubelet
+        - docker
+        - containerd
+      when:
+        - inventory_hostname in groups['kubernetes']
 
-- name: Stop and disable kubernetes related services
-  become: true
-  service:
-    name: "{{ item }}"
-    state: stopped
-    enabled: no
-  with_items:
-    - kubelet
-    - docker
-    - containerd
-  when:
-    - inventory_hostname in groups['kubernetes']
+    - name: Clean up for kubernetes worker dirs
+      file:
+        path: "{{ kube_application_dir }}"
+        state: absent
+      connection: local
+      run_once: True
 
-- name: Clean up for kubernetes worker dirs
-  become: true
-  file:
-    path: "{{ kube_application_dir }}"
-    state: absent
-  connection: local
-  run_once: True
+  rescue:
+    - name: Handle cleanup failure
+      debug:
+        msg: "Some cleanup tasks failed, but continuing..."
+      when:
+        - inventory_hostname in groups['kubernetes']
 
 - name: Print destroy results
   debug:
