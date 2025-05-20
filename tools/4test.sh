@@ -939,35 +939,11 @@ function check_and_reset_kubernetes() {
         if [ -f "/etc/kubernetes/admin.conf" ] || [ -d "/etc/kubernetes/manifests" ]; then
             log info "检测到已有的 Kubernetes 配置，执行重置操作..."
             
-            # 停止所有 Kubernetes 相关的容器
-            if command -v crictl &>/dev/null; then
-                log info "停止所有 Kubernetes 容器..."
-                crictl pods -q | xargs -r crictl stopp 2>/dev/null || true
-                crictl pods -q | xargs -r crictl rmp 2>/dev/null || true
-            fi
-            
-            # 执行 kubeadm reset
-            log info "执行 kubeadm reset..."
-            kubeadm reset -f || {
-                log error "kubeadm reset 执行失败"
+            # 调用 destroy_kubernetes 函数进行清理
+            destroy_kubernetes || {
+                log error "Kubernetes 重置失败"
                 exit 1
             }
-            
-            # 清理额外的配置文件和目录
-            log info "清理 Kubernetes 配置文件和目录..."
-            rm -rf /etc/kubernetes/* || true
-            rm -rf /var/lib/kubelet/* || true
-            rm -rf /var/lib/etcd/* || true
-            rm -rf $HOME/.kube/config || true
-            
-            # 清理网络配置
-            log info "清理网络配置..."
-            ip link delete cni0 2>/dev/null || true
-            ip link delete flannel.1 2>/dev/null || true
-            
-            # 清理 iptables 规则
-            log info "清理 iptables 规则..."
-            iptables -F && iptables -t nat -F && iptables -t mangle -F && iptables -X
             
             log info "Kubernetes 重置完成"
         else
@@ -1527,13 +1503,13 @@ function install_uni_virt() {
     if [ -n "$nodes" ]; then
         for node in $nodes; do
             node_name=${node#node/}
-            # 尝试删除已存在的标签
+        # 尝试删除已存在的标签
             kubectl label node ${node_name} doslab/virt.tool.centos- --overwrite=true || true
-            # 重新添加标签
+        # 重新添加标签
             kubectl label node ${node_name} doslab/virt.tool.centos="" --overwrite=true || {
                 log error "更新节点 ${node_name} 标签失败"
-                exit 1
-            }
+            exit 1
+        }
         done
     else
         log error "未找到可用的节点"
