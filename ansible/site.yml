@@ -32,3 +32,13 @@
     - { role: kubernetes,
         tags: kubernetes,
         when: enable_kubernetes | bool }
+
+- name: Apply role crossplane
+  gather_facts: false
+  hosts:
+    - kubernetes
+  serial: '{{ kube_serial|default("0") }}'
+  roles:
+    - { role: crossplane,
+        tags: crossplane,
+        when: enable_crossplane | bool }

@@ -1,0 +1,27 @@
+---
+- name: Remove Crossplane CLI binary
+  ansible.builtin.file:
+    path: /usr/local/bin/crossplane
+    state: absent
+  become: true
+  tags: [cleanup, crossplane-cli]
+  when:
+    - "'kubernetes' in group_names"  # 仅针对k8s节点执行
+    - ansible_os_family == "RedHat"  # 限制在RHEL/CentOS系统
+  register: crossplane_cli_removal
+  changed_when: crossplane_cli_removal.state == 'absent'
+  ignore_errors: yes
+
+- name: Verify CLI removal
+  ansible.builtin.stat:
+    path: /usr/local/bin/crossplane
+  register: cli_check
+  changed_when: false
+  when: crossplane_cli_removal is changed
+
+- name: Log removal failure
+  ansible.builtin.debug:
+    msg: "Failed to remove Crossplane CLI, manual cleanup required"
+  when:
+    - cli_check.stat.exists
+    - not crossplane_cli_removal.failed
