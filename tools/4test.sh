@@ -31,6 +31,10 @@ fi
 [ -z "${LOCALIP}" ] && LOCALIP=${IP_ADDRESS}
 [ -z "${IMAGETAG}" ] && IMAGETAG=${KUBE_VERSION}
 
+# Volcano 监控组件配置变量
+export VOLCANO_MONITORING_NAMESPACE="volcano-monitoring"  # 可以在这里修改命名空间
+export VOLCANO_MONITORING_IMAGE_PULL_POLICY="IfNotPresent"
+export VOLCANO_MONITORING_YAML_FILE="volcano-monitoring-latest.yaml"
 # 打印日志函数
 function log() {
     # 获取调用者的行号和文件名
@@ -1705,6 +1709,7 @@ function destroy_kubernetes() {
     log info "Kubernetes 集群卸载完成"
 }
 
+
 # 显示帮助信息
 function show_help() {
     echo "使用方法: $0 <命令> [选项]"
@@ -1842,6 +1847,56 @@ function check_cluster_communication() {
     return 0
 }
 
+# --- 查找可用的镜像 ---
+#function find_available_image() {
+#    local image_pattern="$1"
+#    local image_name="$2"
+#
+#    log info "正在查找 $image_name 镜像..."
+#
+#    # 使用docker images查找匹配的镜像
+#    local found_image=$(docker images --format "table {{.Repository}}:{{.Tag}}" | grep -E "^${image_pattern}" | head -1)
+#
+#    if [[ -n "$found_image" ]]; then
+#        log info "找到 $image_name 镜像: $found_image"
+#        echo "$found_image"
+#        return 0
+#    else
+#        log error "未找到 $image_name 镜像，请确保已拉取相关镜像"
+#        log error "可以使用以下命令拉取镜像:"
+#        case "$image_name" in
+#            "Prometheus")
+#                log error "  docker pull prom/prometheus:latest"
+#                ;;
+#            "Grafana")
+#                log error "  docker pull grafana/grafana:latest"
+#                ;;
+#            "KSM")
+#                log error "  docker pull registry.k8s.io/kube-state-metrics/kube-state-metrics:latest"
+#                ;;
+#        esac
+#        return 1
+#    fi
+#}
+# 查找可用镜像的辅助函数 - 修复版本
+function find_available_image() {
+    local pattern="$1"
+    local component_name="$2"
+
+    # 使用 docker images 查找匹配的镜像，只输出镜像名称，不输出日志到 stdout
+    local available_images=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep -E "^${pattern}" | head -n 1)
+
+    if [[ -n "$available_images" ]]; then
+        log info "找到 ${component_name} 镜像: $available_images" >&2  # 日志输出到 stderr
+        echo "$available_images"  # 只有镜像名称输出到 stdout
+        return 0
+    else
+        log warn "未找到 ${component_name} 镜像 (模式: ${pattern})" >&2  # 日志输出到 stderr
+        return 1
+    fi
+}
+
+
 # 添加综合检查函数
 function check_prerequisites() {
     local check_type="$1"
@@ -1886,6 +1941,89 @@ function check_prerequisites() {
                 log error "未找到 Volcano helm chart 文件"
                 check_failed=1
             fi
+            ;;
+         "volcano-monitoring")
+            log info "检查 Volcano 监控组件安装前提条件..."
+
+            # 检查kubectl是否可用
+            if ! command -v kubectl &> /dev/null; then
+                log error "kubectl 未安装或不可用"
+                return 1
+            fi
+
+            # 检查Docker是否可用
+            if ! command -v docker &> /dev/null; then
+                log error "Docker 命令不可用，请确保 Docker 已安装并正在运行"
+                return 1
+            fi
+
+            # 检查YAML文件是否存在
+#            local yaml_file="${OTHERS_DIR}/volcano-monitoring-latest.yaml"
+#            if [[ ! -f "$yaml_file" ]]; then
+#                log error "YAML文件不存在: $yaml_file"
+#                log error "请确保 others 目录下存在 volcano-monitoring-latest.yaml 文件"
+#                return 1
+#            fi
+    # 检查YAML文件是否存在
+            local yaml_file="${OTHERS_DIR}/${VOLCANO_MONITORING_YAML_FILE}"  # 修改：使用变量
+            if [[ ! -f "$yaml_file" ]]; then
+                log error "YAML文件不存在: $yaml_file"
+                log error "请确保 others 目录下存在 ${VOLCANO_MONITORING_YAML_FILE} 文件"  # 修改：使用变量
+                return 1
+            fi
+
+            # 检查并查找可用镜像
+            log info "开始检查可用镜像..."
+
+            # 查找Prometheus镜像
+            local prometheus_image=$(find_available_image "prom/prometheus" "Prometheus")
+            if [[ -z "$prometheus_image" ]]; then
+                log error "请先拉取 Prometheus 镜像: docker pull prom/prometheus:latest"
+                return 1
+            fi
+            export VOLCANO_PROMETHEUS_IMAGE="$prometheus_image"
+
+            # 查找Grafana镜像
+            local grafana_image=$(find_available_image "grafana/grafana" "Grafana")
+            if [[ -z "$grafana_image" ]]; then
+                log error "请先拉取 Grafana 镜像: docker pull grafana/grafana:latest"
+                return 1
+            fi
+            export VOLCANO_GRAFANA_IMAGE="$grafana_image"
+
+            # 查找KSM镜像（可选）
+            local ksm_image=""
+            local ksm_candidates=(
+                "docker.io/volcanosh/kube-state-metrics"
+                "registry.k8s.io/kube-state-metrics/kube-state-metrics"
+                "k8s.gcr.io/kube-state-metrics/kube-state-metrics"
+                "quay.io/coreos/kube-state-metrics"
+            )
+
+            for pattern in "${ksm_candidates[@]}"; do
+                ksm_image=$(find_available_image "$pattern" "KSM")
+                if [[ -n "$ksm_image" ]]; then
+                    break
+                fi
+            done
+
+            if [[ -z "$ksm_image" ]]; then
+                log info "未找到KSM镜像，将跳过KSM镜像替换"
+                log info "建议拉取KSM镜像: docker pull registry.k8s.io/kube-state-metrics/kube-state-metrics:latest"
+                export VOLCANO_KSM_IMAGE=""
+            else
+                export VOLCANO_KSM_IMAGE="$ksm_image"
+            fi
+
+            log info "Volcano 监控组件前提条件检查完成"
+            log info "  YAML文件: ${VOLCANO_MONITORING_YAML_FILE}"  # 新增：显示使用的YAML文件名
+            log info "  命名空间: $VOLCANO_MONITORING_NAMESPACE"
+            log info "  Prometheus 镜像: $VOLCANO_PROMETHEUS_IMAGE"
+            log info "  Grafana 镜像: $VOLCANO_GRAFANA_IMAGE"
+            if [[ -n "$VOLCANO_KSM_IMAGE" ]]; then
+                log info "  KSM 镜像: $VOLCANO_KSM_IMAGE"
+            fi
+            log info "  镜像拉取策略: $VOLCANO_MONITORING_IMAGE_PULL_POLICY"
             ;;
         "crossplane")
             log info "执行 Crossplane 安装前检查..."
@@ -1965,6 +2103,408 @@ function test_function() {
         return 1
     fi
 }
+
+#function install_volcano_monitoring() {
+#    log info "开始安装 Volcano 监控组件..."
+#
+#    # 使用预设的变量
+#    local namespace="$VOLCANO_MONITORING_NAMESPACE"
+#    local prometheus_image="$VOLCANO_PROMETHEUS_IMAGE"
+#    local grafana_image="$VOLCANO_GRAFANA_IMAGE"
+#    local ksm_image="$VOLCANO_KSM_IMAGE"
+#    local image_pull_policy="$VOLCANO_MONITORING_IMAGE_PULL_POLICY"
+#
+#    # 检查YAML文件
+#    local original_yaml_file="${OTHERS_DIR}/${VOLCANO_MONITORING_YAML_FILE}"
+#    local modified_yaml_file="${OTHERS_DIR}/volcano-monitoring-modified-$(date +%Y%m%d%H%M%S).yaml"
+#
+#    # 提取旧namespace
+#    local old_namespace=$(awk '/namespace:/ {print $2; exit}' "$yaml_file")
+#    if [[ -z "$old_namespace" ]]; then
+#        log error "无法从 YAML 中检测 namespace"
+#        return 1
+#    fi
+#    log info "检测到旧 namespace: $old_namespace"
+#
+#    # 镜像替换关键词
+#    local old_prometheus_image="prom/prometheus"
+#    local old_ksm_pattern="docker\.io/volcanosh/kube-state-metrics"
+#    local old_grafana_image="grafana/grafana"
+#
+#    # 备份原文件
+#    local backup_file="${yaml_file}.bak.$(date +%Y%m%d%H%M%S)"
+#    cp "$yaml_file" "$backup_file"
+#    log info "已备份原文件至: $backup_file"
+#
+#    # sed 第一阶段替换
+#    local temp_sed="${yaml_file}.tmp.sed"
+##    local sed_cmds=(
+##        -e "s|\([[:space:]]*namespace: \)${old_namespace}\b|\1${namespace}|g"
+##        -e "s|image: ${old_prometheus_image}[^[:space:]]*|image: ${prometheus_image}|g"
+##        -e "s|image: ${old_grafana_image}[^[:space:]]*|image: ${grafana_image}|g"
+##        -e "s|^\([[:space:]]*imagePullPolicy:\s*\).*|\1${image_pull_policy}|g"
+##        -e "s|\(alertmanager\.\)${old_namespace}\(\.svc\)|\1${namespace}\2|g"
+##        -e "s|\(kube-state-metrics\.\)${old_namespace}\(\.svc\.cluster\.local\)|\1${namespace}\2|g"
+##        -e "s|\(prometheus-service\.\)${old_namespace}\(\.svc\)|\1${namespace}\2|g"
+##    )
+#    local sed_cmds=(
+#        -e "s|\\([[:space:]]*namespace:[[:space:]]*\\)${old_namespace}\\b|\\1${namespace}|g"
+#        -e "s|image:[[:space:]]*${old_prometheus_pattern}[^[:space:]]*|image: ${prometheus_image}|g"
+#        -e "s|image:[[:space:]]*${old_grafana_pattern}[^[:space:]]*|image: ${grafana_image}|g"
+#        -e "s|^\\([[:space:]]*imagePullPolicy:[[:space:]]*\\).*|\\1${image_pull_policy}|g"
+#        -e "s|\\(alertmanager\\.\\)${old_namespace}\\(\\.svc\\)|\\1${namespace}\\2|g"
+#        -e "s|\\(kube-state-metrics\\.\\)${old_namespace}\\(\\.svc\\.cluster\\.local\\)|\\1${namespace}\\2|g"
+#        -e "s|\\(prometheus-service\\.\\)${old_namespace}\\(\\.svc\\)|\\1${namespace}\\2|g"
+#    )
+#
+#    # KSM 替换是可选的
+#    if [[ -n "$ksm_image" ]]; then
+#        sed_cmds+=("-e" "s|image: ${old_ksm_image}[^[:space:]]*|image: ${ksm_image}|g")
+#    fi
+#
+#    sed "${sed_cmds[@]}" "$yaml_file" > "$temp_sed"
+#
+#    # 第二阶段：确保所有容器都有 imagePullPolicy
+#    local temp_final="${yaml_file}.tmp"
+#    awk -v policy="$image_pull_policy" '
+#      BEGIN { in_container = 0; image_line = ""; inserted = 0 }
+#      {
+#        if ($0 ~ /^[[:space:]]*-[[:space:]]*name:/ || $0 ~ /^[[:space:]]*containers:/) {
+#          in_container = 1
+#          inserted = 0
+#        }
+#
+#        if (in_container && $0 ~ /^[[:space:]]*image:[[:space:]]*/) {
+#          image_line = $0
+#          indent = match($0, /[^ ]/) - 1
+#          image_indent = substr($0, 1, indent)
+#        }
+#
+#        if (in_container && $0 ~ /^[[:space:]]*imagePullPolicy:/) {
+#          inserted = 1
+#        }
+#
+#        print $0
+#
+#        if (in_container && $0 == image_line && inserted == 0) {
+#          print image_indent "imagePullPolicy: " policy
+#          inserted = 1
+#        }
+#      }
+#    ' "$temp_sed" > "$temp_final"
+#
+#    # 应用最终修改
+#    if [[ $? -eq 0 ]]; then
+#        mv "$temp_final" "$yaml_file"
+#        rm -f "$temp_sed"
+#        log info "YAML 文件修改完成: $yaml_file"
+#
+#        # 应用 Kubernetes 配置
+#        log info "开始部署 Volcano 监控组件..."
+#        if kubectl apply -f "$yaml_file"; then
+#            log info "Volcano 监控组件部署成功"
+#            log info ""
+#            log info "部署信息:"
+#            log info "   命名空间: $namespace"
+#            log info "   Prometheus 镜像: $prometheus_image"
+#            log info "   Grafana 镜像: $grafana_image"
+#            if [[ -n "$ksm_image" ]]; then
+#                log info "   KSM 镜像: $ksm_image"
+#            fi
+#            log info "   镜像拉取策略: $image_pull_policy"
+#            log info ""
+#            log info "检查部署状态:"
+#            kubectl get pods -n "$namespace"
+#            return 0
+#        else
+#            log error "Volcano 监控组件部署失败"
+#            return 1
+#        fi
+#    else
+#        log error "YAML 文件处理失败"
+#        rm -f "$temp_sed" "$temp_final"
+#        return 1
+#    fi
+#}
+
+
+function install_volcano_monitoring() {
+    log info "开始安装 Volcano 监控组件..."
+
+    # 使用预设的变量
+    local namespace="$VOLCANO_MONITORING_NAMESPACE"
+    local prometheus_image="$VOLCANO_PROMETHEUS_IMAGE"
+    local grafana_image="$VOLCANO_GRAFANA_IMAGE"
+    local ksm_image="$VOLCANO_KSM_IMAGE"
+    local image_pull_policy="$VOLCANO_MONITORING_IMAGE_PULL_POLICY"
+
+    # 调试信息 - 检查镜像变量内容
+    log info "调试信息 - 镜像变量内容:"
+    log info "  Prometheus: '$prometheus_image'"
+    log info "  Grafana: '$grafana_image'"
+    log info "  KSM: '$ksm_image'"
+
+    # 清理镜像变量中可能包含的日志信息
+    prometheus_image=$(echo "$prometheus_image" | tail -1 | grep -E '^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$' || echo "$prometheus_image")
+    grafana_image=$(echo "$grafana_image" | tail -1 | grep -E '^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$' || echo "$grafana_image")
+    if [[ -n "$ksm_image" ]]; then
+        ksm_image=$(echo "$ksm_image" | tail -1 | grep -E '^[a-zA-Z0-9._/-]+:[a-zA-Z0-9._-]+$' || echo "$ksm_image")
+    fi
+
+    log info "清理后的镜像变量:"
+    log info "  Prometheus: '$prometheus_image'"
+    log info "  Grafana: '$grafana_image'"
+    log info "  KSM: '$ksm_image'"
+
+    # 原始YAML文件和修改后的文件
+    local original_yaml_file="${OTHERS_DIR}/${VOLCANO_MONITORING_YAML_FILE}"
+    local modified_yaml_file="${OTHERS_DIR}/volcano-monitoring-modified-$(date +%Y%m%d%H%M%S).yaml"
+
+    # 检查原始YAML文件是否存在
+    if [[ ! -f "$original_yaml_file" ]]; then
+        log error "原始YAML文件不存在: $original_yaml_file"
+        return 1
+    fi
+
+    log info "使用原始文件: $original_yaml_file"
+    log info "生成修改后文件: $modified_yaml_file"
+
+    # 提取旧namespace - 改进检测方法
+    local old_namespace=$(grep -E "^\s*namespace:\s*" "$original_yaml_file" | head -1 | awk '{print $2}')
+    if [[ -z "$old_namespace" ]]; then
+        log error "无法从 YAML 中检测 namespace"
+        return 1
+    fi
+    log info "检测到旧 namespace: $old_namespace"
+
+    # 检查目标命名空间是否存在，如果不存在则创建
+    log info "检查命名空间: $namespace"
+    if kubectl get namespace "$namespace" &>/dev/null; then
+        log info "命名空间 '$namespace' 已存在"
+    else
+        log info "命名空间 '$namespace' 不存在，正在创建..."
+        if kubectl create namespace "$namespace"; then
+            log info "命名空间 '$namespace' 创建成功"
+        else
+            log error "创建命名空间 '$namespace' 失败"
+            return 1
+        fi
+    fi
+
+    # 为命名空间添加标签（可选，便于管理）
+    log info "为命名空间添加标签..."
+    kubectl label namespace "$namespace" app=volcano-monitoring --overwrite &>/dev/null || {
+        log warn "添加命名空间标签失败，但不影响部署"
+    }
+
+    # 使用 awk 进行安全的字符串替换
+    log info "开始处理 YAML 文件内容..."
+
+    # 创建临时文件
+    local temp_file="${modified_yaml_file}.tmp"
+
+    # 使用 awk 进行所有替换操作 - 修复镜像替换问题
+    if ! awk -v old_ns="$old_namespace" \
+             -v new_ns="$namespace" \
+             -v prom_img="$prometheus_image" \
+             -v grafana_img="$grafana_image" \
+             -v ksm_img="$ksm_image" \
+             -v pull_policy="$image_pull_policy" '
+    {
+        line = $0
+
+        # 替换命名空间 - 使用字符串匹配
+        if (match(line, /^[[:space:]]*namespace:[[:space:]]*/) && index(line, old_ns)) {
+            sub(/namespace:[[:space:]]*[^[:space:]]*/, "namespace: " new_ns, line)
+        }
+
+        # 替换 Prometheus 镜像 - 更精确的匹配
+        if (match(line, /^[[:space:]]*image:[[:space:]]*prom\/prometheus/)) {
+            sub(/image:[[:space:]]*prom\/prometheus[^[:space:]]*/, "image: " prom_img, line)
+        }
+
+        # 替换 Grafana 镜像 - 更精确的匹配
+        if (match(line, /^[[:space:]]*image:[[:space:]]*grafana\/grafana/)) {
+            sub(/image:[[:space:]]*grafana\/grafana[^[:space:]]*/, "image: " grafana_img, line)
+        }
+
+        # 替换 KSM 镜像（如果提供）
+        if (ksm_img != "" && match(line, /^[[:space:]]*image:[[:space:]]*docker\.io\/volcanosh\/kube-state-metrics/)) {
+            sub(/image:[[:space:]]*docker\.io\/volcanosh\/kube-state-metrics[^[:space:]]*/, "image: " ksm_img, line)
+        }
+
+        # 替换 imagePullPolicy
+        if (match(line, /^[[:space:]]*imagePullPolicy:[[:space:]]*/)) {
+            sub(/imagePullPolicy:[[:space:]]*[^[:space:]]*/, "imagePullPolicy: " pull_policy, line)
+        }
+
+        # 替换服务引用中的命名空间 - 使用字符串替换
+        if (index(line, "alertmanager." old_ns ".svc")) {
+            gsub("alertmanager\\." old_ns "\\.svc", "alertmanager." new_ns ".svc", line)
+        }
+        if (index(line, "kube-state-metrics." old_ns ".svc.cluster.local")) {
+            gsub("kube-state-metrics\\." old_ns "\\.svc\\.cluster\\.local", "kube-state-metrics." new_ns ".svc.cluster.local", line)
+        }
+        if (index(line, "prometheus-service." old_ns ".svc")) {
+            gsub("prometheus-service\\." old_ns "\\.svc", "prometheus-service." new_ns ".svc", line)
+        }
+
+        print line
+    }' "$original_yaml_file" > "$temp_file"; then
+        log error "awk 处理失败"
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    # 第二阶段：确保所有容器都有 imagePullPolicy
+    log info "确保所有容器都有 imagePullPolicy 配置..."
+    if ! awk -v policy="$image_pull_policy" '
+      BEGIN {
+        in_container = 0
+        image_line = ""
+        inserted = 0
+        image_indent = ""
+      }
+      {
+        # 检测容器开始
+        if ($0 ~ /^[[:space:]]*-[[:space:]]*name:/ || $0 ~ /^[[:space:]]*containers:/) {
+          in_container = 1
+          inserted = 0
+        }
+
+        # 检测到新的顶级段落，重置状态
+        if ($0 ~ /^[^[:space:]]/ && $0 !~ /^[[:space:]]*-/) {
+          in_container = 0
+        }
+
+        # 记录镜像行
+        if (in_container && $0 ~ /^[[:space:]]*image:[[:space:]]*/) {
+          image_line = $0
+          # 计算缩进
+          indent_match = match($0, /[^ ]/)
+          if (indent_match > 0) {
+            image_indent = substr($0, 1, indent_match - 1)
+          }
+        }
+
+        # 检查是否已有 imagePullPolicy
+        if (in_container && $0 ~ /^[[:space:]]*imagePullPolicy:/) {
+          inserted = 1
+        }
+
+        # 输出当前行
+        print $0
+
+        # 在镜像行后插入 imagePullPolicy（如果还没有）
+        if (in_container && $0 == image_line && inserted == 0 && image_indent != "") {
+          print image_indent "imagePullPolicy: " policy
+          inserted = 1
+        }
+      }
+    ' "$temp_file" > "$modified_yaml_file"; then
+        log error "imagePullPolicy 处理失败"
+        rm -f "$temp_file"
+        return 1
+    fi
+
+    # 清理临时文件
+    rm -f "$temp_file"
+
+    # 验证生成的文件
+    if [[ ! -f "$modified_yaml_file" ]]; then
+        log error "修改后的 YAML 文件生成失败"
+        return 1
+    fi
+
+    # 检查文件是否为空
+    if [[ ! -s "$modified_yaml_file" ]]; then
+        log error "修改后的 YAML 文件为空"
+        rm -f "$modified_yaml_file"
+        return 1
+    fi
+
+    # 验证生成的 YAML 文件中的镜像字段
+    log info "验证生成的 YAML 文件中的镜像..."
+    local prom_check=$(grep -E "^\s*image:\s*.*prom.*" "$modified_yaml_file" | head -1)
+    local grafana_check=$(grep -E "^\s*image:\s*.*grafana.*" "$modified_yaml_file" | head -1)
+
+    if [[ -n "$prom_check" ]]; then
+        log info "Prometheus 镜像行: $prom_check"
+    fi
+    if [[ -n "$grafana_check" ]]; then
+        log info "Grafana 镜像行: $grafana_check"
+    fi
+
+    log info "YAML 文件修改完成: $modified_yaml_file"
+
+    # 显示修改摘要
+    log info "修改摘要:"
+    log info "  原始文件: $(basename $original_yaml_file)"
+    log info "  修改后文件: $(basename $modified_yaml_file)"
+    log info "  命名空间: $old_namespace -> $namespace"
+    log info "  Prometheus 镜像: $prometheus_image"
+    log info "  Grafana 镜像: $grafana_image"
+    if [[ -n "$ksm_image" ]]; then
+        log info "  KSM 镜像: $ksm_image"
+    fi
+    log info "  镜像拉取策略: $image_pull_policy"
+
+    # 验证命名空间再次确认存在
+    if ! kubectl get namespace "$namespace" &>/dev/null; then
+        log error "命名空间 '$namespace' 不存在，无法继续部署"
+        return 1
+    fi
+
+    # 应用 Kubernetes 配置
+    log info "开始部署 Volcano 监控组件到命名空间: $namespace"
+    if kubectl apply -f "$modified_yaml_file"; then
+        log info "Volcano 监控组件部署成功"
+
+        # 等待 Pod 启动
+        log info "等待 Pod 启动..."
+        local max_wait=60
+        local wait_count=0
+        while [ $wait_count -lt $max_wait ]; do
+            local pod_count=$(kubectl get pods -n "$namespace" --no-headers 2>/dev/null | wc -l)
+            if [ "$pod_count" -gt 0 ]; then
+                log info "检测到 Pod 已开始创建"
+                break
+            fi
+            sleep 2
+            ((wait_count++))
+        done
+
+        log info ""
+        log info "部署信息:"
+        log info "   原始YAML文件: ${VOLCANO_MONITORING_YAML_FILE}"
+        log info "   使用的配置文件: $(basename $modified_yaml_file)"
+        log info "   命名空间: $namespace"
+        log info "   Prometheus 镜像: $prometheus_image"
+        log info "   Grafana 镜像: $grafana_image"
+        if [[ -n "$ksm_image" ]]; then
+            log info "   KSM 镜像: $ksm_image"
+        fi
+        log info "   镜像拉取策略: $image_pull_policy"
+        log info ""
+        log info "检查部署状态:"
+        kubectl get pods -n "$namespace"
+        log info ""
+        log info "检查服务状态:"
+        kubectl get svc -n "$namespace"
+
+        # 可选：保留修改后的文件供后续使用
+        log info "修改后的配置文件已保存: $modified_yaml_file"
+        return 0
+    else
+        log error "Volcano 监控组件部署失败"
+        log error "修改后的配置文件位置: $modified_yaml_file"
+        log error "请检查命名空间 '$namespace' 中的资源状态:"
+        kubectl get all -n "$namespace" 2>/dev/null || log error "无法获取命名空间资源信息"
+        return 1
+    fi
+}
+
+
 
 
 # 设置 Crossplane 相关环境变量
@@ -2262,6 +2802,7 @@ function main() {
                     push_crossplane_images
                     install_crossplane
                     install_volcano
+                    install_volcano_monitoring
                     install_uni_virt
                     log info "所有组件安装完成！"
                     kubectl get pods -A
@@ -2309,7 +2850,13 @@ function main() {
                     install_volcano
                     log info "Volcano 安装完成"
                     ;;
-                
+                "volcano-monitoring")
+                    log info "开始安装 Volcano 监控组件..."
+                    init_env
+                    check_prerequisites "volcano-monitoring" || { log error "Volcano 监控组件安装前检查失败"; exit 1; }
+                    install_volcano_monitoring
+                    log info "Volcano 监控组件安装完成"
+                    ;;
                 "check_and_upload")
                     log info "开始检查文件并上传镜像和RPM包..."
                     init_env
