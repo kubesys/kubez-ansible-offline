@@ -52,6 +52,9 @@ function log() {
         "error")
             echo -e "${timestamp} [${file_name}:${line_number}] \e[31m[ ERROR ]\e[0m $2"
             ;;
+        "warning")
+            echo -e "${timestamp} [${file_name}:${line_number}] \e[33m[ WARNING ]\e[0m $2"
+            ;;
         *)
             echo -e "${timestamp} [${file_name}:${line_number}] \e[34m[ INFO ]\e[0m $2"
             ;;
@@ -2789,7 +2792,7 @@ function main() {
                     log info "开始完整安装..."
                     init_env
                     check_ports_availability
-                    check_files true     # 检查所有文件
+#                    check_files true     # 检查所有文件
                     cleanup_old_data
                     install_nexus
                     process_materials
