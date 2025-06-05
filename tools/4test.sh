@@ -20,7 +20,7 @@
 export PKGPWD=$(pwd)
 # 引入 kubez-ansible 和 base.sh
 export KUBEZ_ANSIBLE_DIR="${PKGPWD}/kubez-ansible-offline-master"
-
+export KUBEZ_ANSIBLE_CMD="kubez-ansible"
 
 # 设置 INVENTORY 变量
 if [ -z "${INVENTORY}" ]; then
@@ -413,7 +413,8 @@ function wait_harbor_ready() {
 # 检查内存
 function check_memory() {
     mem_total_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    mem_total_gb=$(echo "scale=2; $mem_total_kb / 1024 / 1024" | bc)
+    # 由于 bc 命令可能未安装，使用 awk 替代计算内存大小
+    mem_total_gb=$(echo "$mem_total_kb" | awk '{printf "%.2f", $1 / 1024 / 1024}')
     required_mem_gb=4.0
 
     if (( $(echo "$mem_total_gb < $required_mem_gb" | bc -l) )); then
@@ -583,13 +584,39 @@ function install_nexus() {
     # 检查是否已安装
     if [ -d "/data/nexus_local" ]; then
         log info "Nexus 目录已存在"
+        
+        # 检查nexus.sh文件是否存在
+        if [ ! -f "/data/nexus_local/nexus.sh" ]; then
+            log warn "Nexus 目录存在但 nexus.sh 文件不存在，可能是不完整安装"
+            log info "清理现有 Nexus 目录内容并重新安装"
+            rm -rf /data/nexus_local/* 2>/dev/null || log error "清理 /data/nexus_local 内容失败，但将继续执行"
+            
+            # 重新解压安装
+            log info "准备重新安装 Nexus"
+            tar -zxvf nexus.tar.gz -C /data || { 
+                log error "解压nexus.tar.gz失败"
+                return 1  # 使用return而不是exit，允许脚本继续执行
+            }
+        fi
     else
         log info "准备开始安装 Nexus"
         mkdir -p /data
-        tar -zxvf nexus.tar.gz -C /data || { log error "解压nexus.tar.gz失败"; exit 1; }
+        tar -zxvf nexus.tar.gz -C /data || { 
+            log error "解压nexus.tar.gz失败"
+            return 1  # 使用return而不是exit，允许脚本继续执行
+        }
     fi
 
-    cd /data/nexus_local && bash nexus.sh start || { log error "启动nexus服务失败"; exit 1; }
+    # 检查nexus.sh文件是否存在
+    if [ ! -f "/data/nexus_local/nexus.sh" ]; then
+        log error "nexus.sh 文件不存在，无法启动 Nexus 服务"
+        return 1  # 使用return而不是exit，允许脚本继续执行
+    fi
+
+    cd /data/nexus_local && bash nexus.sh start || { 
+        log error "启动nexus服务失败"
+        return 1  # 使用return而不是exit，允许脚本继续执行
+    }
 
     if ! grep -q "bash nexus.sh start" /etc/rc.d/rc.local; then
         chmod +x /etc/rc.d/rc.local
@@ -597,7 +624,7 @@ function install_nexus() {
     fi
 
     # 等待 Nexus 服务启动
-    wait_nexus_ready
+    wait_nexus_ready || return 1  # 允许失败时继续执行
 }
 
 # 修改 process_materials 函数，在加载镜像前添加 Docker 安装和启动
@@ -845,10 +872,9 @@ function setup_kubez_ansible_auth() {
         ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa || { log error "生成 SSH 密钥失败"; exit 1; }
     fi
 
-
     # 执行免密登录配置
     log info "执行免密登录配置"
-    kubez-ansible authorized-key || { log error "配置免密登录失败"; exit 1; }
+    ${KUBEZ_ANSIBLE_CMD} authorized-key || { log error "配置免密登录失败"; exit 1; }
 
     # 验证免密登录配置
     log info "验证免密登录配置"
@@ -1041,29 +1067,29 @@ function update_inventory() {
     log info "inventory 配置更新成功"
     return 0
 }
+# 处理 globals.yml 配置
+function setup_globals_config() {
+    log info "配置 globals.yml..."
 
-# 修改 setup_kubernetes 函数，添加重置检查和更新 inventory
-function setup_kubernetes() {
-    # 首先检查并重置已有的 Kubernetes 配置
-    check_and_reset_kubernetes
-    
-    # 更新 inventory 配置
-    update_inventory || { log error "更新 inventory 配置失败"; exit 1; }
-    
-    # 创建必要目录
-    mkdir -p /etc/kubez
-    mkdir -p /data/prometheus /data/grafana
+    # 检查并创建配置目录
+    mkdir -p /etc/kubez || { log error "创建 /etc/kubez 目录失败"; exit 1; }
 
-    # 检查并备份 globals.yml
+    # 检查并备份现有的 globals.yml
     if [ -f "/etc/kubez/globals.yml" ]; then
         local timestamp=$(date +%Y%m%d_%H%M%S)
-        cp -f /etc/kubez/globals.yml "/etc/kubez/globals.yml.bak.${timestamp}" || { log error "备份 globals.yml 失败"; exit 1; }
+        cp -f /etc/kubez/globals.yml "/etc/kubez/globals.yml.bak.${timestamp}" || {
+            log error "备份 globals.yml 失败"
+            exit 1
+        }
     fi
 
-    # 使用新的配置文件
-    cp -f "${PKGPWD}/kubez-ansible-offline-master/etc/kubez/globals.yml" /etc/kubez/globals.yml || { log error "复制新的 globals.yml 失败"; exit 1; }
+    # 复制新的配置文件
+    cp -f "${PKGPWD}/kubez-ansible-offline-master/etc/kubez/globals.yml" /etc/kubez/globals.yml || {
+        log error "复制新的 globals.yml 失败"
+        exit 1
+    }
 
-    # 修改 globals.yml 配置
+    # 基础配置修改
     sed -i "s/kube_release: .*/kube_release: ${KUBE_VERSION}/g" /etc/kubez/globals.yml
     sed -i "s/network_interface: .*/network_interface: \"${NETWORK_INTERFACE}\"/g" /etc/kubez/globals.yml
     sed -i "s|yum_baseurl: .*|yum_baseurl: \"${YUM_REPO}\"|g" /etc/kubez/globals.yml
@@ -1072,10 +1098,85 @@ function setup_kubernetes() {
     sed -i "s/cluster_cidr: .*/cluster_cidr: \"172.30.0.0\/16\"/g" /etc/kubez/globals.yml
     sed -i "s/service_cidr: .*/service_cidr: \"10.254.0.0\/16\"/g" /etc/kubez/globals.yml
 
-    # 执行Kubernetes安装
-    kubez-ansible bootstrap-servers || { log error "bootstrap-servers 执行失败"; exit 1; }
-    kubez-ansible deploy || { log error "deploy 执行失败"; exit 1; }
+    # 如果存在节点配置文件，检查是否需要配置高可用
+    if [ -f "${NODE_CONFIG_FILE}" ]; then
+        # 获取docker-master节点数量
+        local master_count=$(awk '/^\[docker-master\]/{flag=1;next} /^\[/{flag=0} flag&&/^[^#]/{count++} END{print count}' "${NODE_CONFIG_FILE}")
 
+        # 仅当 master 节点大于等于3且为奇数时，启用高可用配置
+        if [ $master_count -ge 3 ] && [ $((master_count % 2)) -eq 1 ]; then
+            log info "检测到 ${master_count} 个 master 节点，启用高可用配置"
+
+            # 查找可用的 VIP 地址
+#            local network_prefix=$(ip -o -4 addr show ${NETWORK_INTERFACE} | awk '{print $4}' | cut -d'/' -f1 | rev | cut -d'.' -f2- | rev)
+#            local vip_found=0
+
+            # 在当前网段中查找未使用的IP作为VIP
+#            for i in {2..254}; do
+#                local test_ip="${network_prefix}.${i}"
+#                if ! ping -c 1 -W 1 "${test_ip}" &>/dev/null; then
+#                    log info "找到可用的 VIP 地址: ${test_ip}"
+#                    # 启用高可用配置
+#                    sed -i "s/^#enable_kubernetes_ha: .*/enable_kubernetes_ha: \"yes\"/" /etc/kubez/globals.yml
+#                    sed -i "s/^#kube_vip_address: .*/kube_vip_address: \"${test_ip}\"/" /etc/kubez/globals.yml
+#                    sed -i "s/^#kube_vip_port: .*/kube_vip_port: \"8443\"/" /etc/kubez/globals.yml
+#                    vip_found=1
+#                    break
+#                fi
+#            done
+# 启用高可用配置
+            sed -i "s/^#enable_kubernetes_ha: .*/enable_kubernetes_ha: \"yes\"/" /etc/kubez/globals.yml
+            sed -i "s/^#kube_vip_port: .*/kube_vip_port: \"8443\"/" /etc/kubez/globals.yml
+            cat /etc/kubez/globals.yml
+#            if [ $vip_found -eq 0 ]; then
+#                log error "无法找到可用的 VIP 地址"
+#                exit 1
+#            fi
+        else
+            log info "使用多节点非高可用配置"
+        fi
+    else
+        log info "使用单节点配置"
+    fi
+
+    log info "globals.yml 配置完成"
+}
+
+# 修改 setup_kubernetes 函数，添加重置检查和更新 inventory
+function setup_kubernetes() {
+    # 首先检查并重置已有的 Kubernetes 配置
+    check_and_reset_kubernetes
+    
+    # 更新 inventory 配置
+    if [ ! -f "${NODE_CONFIG_FILE}" ]; then
+        update_inventory || { log error "更新 inventory 配置失败"; exit 1; }
+    fi
+    
+    # 创建必要目录
+    mkdir -p /etc/kubez
+    mkdir -p /data/prometheus /data/grafana
+
+#    # 检查并备份 globals.yml
+#    if [ -f "/etc/kubez/globals.yml" ]; then
+#        local timestamp=$(date +%Y%m%d_%H%M%S)
+#        cp -f /etc/kubez/globals.yml "/etc/kubez/globals.yml.bak.${timestamp}" || { log error "备份 globals.yml 失败"; exit 1; }
+#    fi
+#
+#    # 使用新的配置文件
+#    cp -f "${PKGPWD}/kubez-ansible-offline-master/etc/kubez/globals.yml" /etc/kubez/globals.yml || { log error "复制新的 globals.yml 失败"; exit 1; }
+#
+#    # 修改 globals.yml 配置
+#    sed -i "s/kube_release: .*/kube_release: ${KUBE_VERSION}/g" /etc/kubez/globals.yml
+#    sed -i "s/network_interface: .*/network_interface: \"${NETWORK_INTERFACE}\"/g" /etc/kubez/globals.yml
+#    sed -i "s|yum_baseurl: .*|yum_baseurl: \"${YUM_REPO}\"|g" /etc/kubez/globals.yml
+#    sed -i "s|image_repository: .*|image_repository: \"${LOCAL_REGISTRY}\"|g" /etc/kubez/globals.yml
+#    sed -i "s|image_repository_container: .*|image_repository_container: \"${CONTAINER_REGISTRY}\"|g" /etc/kubez/globals.yml
+#    sed -i "s/cluster_cidr: .*/cluster_cidr: \"172.30.0.0\/16\"/g" /etc/kubez/globals.yml
+#    sed -i "s/service_cidr: .*/service_cidr: \"10.254.0.0\/16\"/g" /etc/kubez/globals.yml
+    setup_globals_config || { log error "配置 globals.yml 失败"; exit 1; }
+    # 执行Kubernetes安装
+    ${KUBEZ_ANSIBLE_CMD} bootstrap-servers || { log error "bootstrap-servers 执行失败"; exit 1; }
+    ${KUBEZ_ANSIBLE_CMD} deploy || { log error "deploy 执行失败"; exit 1; }
 }
 
 # 等待kubernetes集群就绪
@@ -1153,7 +1254,53 @@ function check_harbor_connectivity() {
         exit 1
     fi
 }
+# 检查 Harbor 连接状态并尝试恢复
+function check_harbor_connectivity_recover() {
+    log info "检查 Harbor 连接状态..."
 
+    # 尝试访问 Harbor API
+    if ! curl -s -f "http://${IP_ADDRESS}:${HARBOR_PORT}/api/v2.0/health" &>/dev/null; then
+        log warn "Harbor 服务不可访问，尝试重启服务..."
+
+        # 检查 Harbor 服务状态
+        if systemctl status harbor &>/dev/null; then
+            # 服务存在，尝试重启
+            log info "尝试重启 Harbor 服务..."
+            if ! systemctl restart harbor; then
+                log error "Harbor 服务重启失败，尝试重新安装"
+                cleanup_harbor_data
+                install_harbor
+                return
+            fi
+
+            # 等待服务启动
+            local max_retries=30
+            local count=0
+            while [ $count -lt $max_retries ]; do
+                if curl -s -f "http://${IP_ADDRESS}:${HARBOR_PORT}/api/v2.0/health" &>/dev/null; then
+                    log info "Harbor 服务已恢复"
+                    return 0
+                fi
+                log info "等待 Harbor 服务就绪... (${count}/${max_retries})"
+                sleep 5
+                ((count++))
+            done
+
+            # 重启后仍无法访问，执行重装
+            log error "Harbor 服务重启后仍无法访问，尝试重新安装"
+            cleanup_harbor_data
+            install_harbor
+        else
+            # 服务不存在，直接重装
+            log error "Harbor 服务不存在，执行安装"
+            cleanup_harbor_data
+            install_harbor
+        fi
+    else
+        log info "Harbor 服务运行正常"
+        return 0
+    fi
+}
 # 添加安装 docker-compose 的函数
 function install_docker_compose() {
     log info "检查并安装 docker-compose..."
@@ -1545,9 +1692,13 @@ function install_uni_virt() {
 
 # 卸载kubernetes集群
 function destroy_kubernetes() {
-    local inventory_file="${1:-${ALL_IN_ONE:-/usr/share/kubez-ansible/ansible/inventory/all-in-one}}"
-    log info "开始卸载 Kubernetes 集群，inventory: $inventory_file"
-    kubez-ansible -i "$inventory_file" destroy --yes-i-really-really-mean-it || { 
+    log info "开始卸载 Kubernetes 集群，inventory: $INVENTORY"
+    
+    # 先卸载 Kube-OVN
+    uninstall_kube_ovn
+    
+    # 然后卸载 Kubernetes 集群
+    ${KUBEZ_ANSIBLE_CMD} destroy --yes-i-really-really-mean-it || { 
         log error "卸载 Kubernetes 集群失败"; 
         exit 1; 
     }
@@ -1566,6 +1717,9 @@ function show_help() {
     echo "  harbor      仅安装 Harbor"
     echo "  monitoring  仅安装监控组件（Prometheus + Grafana）"
     echo "  univirt    仅安装 UniVirt"
+    echo "  crossplane   仅安装 Crossplane"
+    echo "  check_and_upload  仅检查文件并上传镜像和RPM包"
+    echo "  volcano      仅安装 Volcano"
     echo ""
     echo "其他命令:"
     echo "  destroy      卸载系统"
@@ -1575,11 +1729,18 @@ function show_help() {
     echo "  HARBOR_PORT      设置Harbor端口 (默认: 8080)"
     echo "  UNIVIRT_VERSION  设置UniVirt版本 (默认: v1.0.0.lab)"
     echo ""
+    echo "多节点部署说明:"
+    echo "  1. 确保已创建 multinode 配置文件，包含必要的节点组"
+    echo "  2. 确保所有节点之间可以通过主机名互相访问"
+    echo "  3. 确保部署节点可以SSH免密登录到所有其他节点"
+    echo "  4. 节点配置文件将直接用作 inventory 文件"
+    echo ""
     echo "示例:"
     echo "  $0 install all                                  # 完整安装所有组件"
     echo "  $0 install harbor                              # 仅安装 Harbor"
     echo "  HARBOR_PORT=9090 $0 install harbor            # 使用自定义端口安装 Harbor"
     echo "  UNIVIRT_VERSION=v2.0.0 $0 install univirt    # 安装指定版本的 UniVirt"
+    echo "  $0 install check_and_upload                   # 仅检查文件并上传镜像和RPM包"
 }
 
 # 清理旧的配置和数据
@@ -1597,7 +1758,7 @@ function cleanup_old_data() {
     for dir in "${dirs_to_clean[@]}"; do
         if [ -d "$dir" ]; then
             log info "清理目录: $dir"
-            rm -rf "$dir" || { log error "清理 $dir 失败"; exit 1; }
+            rm -rf "$dir"/* 2>/dev/null || log error "清理 $dir 内容失败，但将继续执行"
         fi
     done
 
@@ -1666,7 +1827,6 @@ function check_cluster_communication() {
     
     # 检查节点状态
     if ! kubectl get nodes &>/dev/null; then
-        log error "无法获取集群节点信息"
         return 1
     fi
     
@@ -1707,7 +1867,62 @@ function check_prerequisites() {
                 check_failed=1
             fi
             ;;
-            
+        # 在 check_prerequisites 函数中添加 Volcano 检查分支
+        "volcano")
+            log info "执行 Volcano 安装前检查..."
+            # 检查 kubectl 和集群状态
+            if ! check_cluster_communication; then
+                check_failed=1
+            fi
+
+            # 检查 helm 是否安装
+            if ! command -v helm &>/dev/null; then
+                log error "Helm 未安装"
+                check_failed=1
+            fi
+
+            # 检查 Volcano helm chart
+            if ! find "${OTHERS_DIR}" -name "volcano-*.tgz" -type f &>/dev/null; then
+                log error "未找到 Volcano helm chart 文件"
+                check_failed=1
+            fi
+            ;;
+        "crossplane")
+            log info "执行 Crossplane 安装前检查..."
+            # 检查 kubectl 和集群状态
+            if ! check_cluster_communication; then
+                check_failed=1
+            fi
+
+            # 检查 helm 是否安装
+            if ! command -v helm &>/dev/null; then
+                log error "Helm 未安装"
+                check_failed=1
+            fi
+
+            # 检查必要的文件
+            if [ ! -d "${IMAGE_DIR}/crossplane" ]; then
+                log error "Crossplane 镜像目录不存在: ${IMAGE_DIR}/crossplane"
+                check_failed=1
+            fi
+
+            # 检查 provider-kubernetes 镜像文件
+            if ! find "${IMAGE_DIR}/crossplane" -name "provider-kubernetes*.tar" -type f &>/dev/null; then
+                log error "未找到 provider-kubernetes 镜像文件"
+                check_failed=1
+            fi
+
+            # 检查 Crossplane helm chart
+            if ! find "${OTHERS_DIR}" -name "crossplane-*.tgz" -type f &>/dev/null; then
+                log error "未找到 Crossplane helm chart 文件"
+                check_failed=1
+            fi
+
+            # 检查 Harbor 是否可用
+            if ! check_harbor_connectivity_recover; then
+                check_failed=1
+            fi
+            ;;
         *)
             log error "未知的检查类型: ${check_type}"
             return 1
@@ -1722,10 +1937,306 @@ function check_prerequisites() {
     log info "${check_type} 安装前检查通过"
     return 0
 }
+function test_function() {
+    local function_name=$1
+    shift
+    
+    # 解析参数为键值对
+    declare -A params
+    for arg in "$@"; do
+        IFS='=' read -r key value <<< "$arg"
+        params["$key"]="$value"
+    done
+
+    # 动态调用函数并传递参数
+    if declare -f "$function_name" > /dev/null; then
+        # 将参数转换为环境变量
+        for key in "${!params[@]}"; do
+            export "$key"="${params[$key]}"
+        done
+        
+        log info "开始测试函数：$function_name"
+        "$function_name"
+        local ret=$?
+        log info "函数测试完成，返回值：$ret"
+        return $ret
+    else
+        log error "函数不存在：$function_name"
+        return 1
+    fi
+}
+
+
+# 设置 Crossplane 相关环境变量
+function set_crossplane_env() {
+    # 从镜像文件名提取版本号
+    local crossplane_dir="${IMAGE_DIR}/crossplane"
+    local provider_tar=$(find "${crossplane_dir}" -name "provider-kubernetes*.tar" | head -n 1)
+
+    if [ -z "${provider_tar}" ]; then
+        log error "未找到 provider-kubernetes 镜像文件"
+        return 1
+    fi
+
+    # 提取版本号
+    CROSSPLANE_VERSION=$(basename "${provider_tar}" | grep -oP 'v\d+\.\d+\.\d+' || echo "")
+    if [ -z "${CROSSPLANE_VERSION}" ]; then
+        log error "未指定 provider-kubernetes 版本"
+        provider_version=latest
+    fi
+
+    # 设置镜像相关变量
+    export CROSSPLANE_SOURCE_IMAGE="xpkg.upbound.io/upbound/provider-kubernetes:${CROSSPLANE_VERSION}"
+    export CROSSPLANE_TARGET_IMAGE="${CONTAINER_REGISTRY}/library/provider-kubernetes:${CROSSPLANE_VERSION}"
+
+    log info "Crossplane 环境变量设置完成:
+    版本: ${CROSSPLANE_VERSION}
+    源镜像: ${CROSSPLANE_SOURCE_IMAGE}
+    目标镜像: ${CROSSPLANE_TARGET_IMAGE}"
+
+    return 0
+}
+
+# 修改后的推送镜像函数
+function push_crossplane_images() {
+    log info "开始推送 Crossplane 镜像..."
+
+    # 设置环境变量
+    if ! set_crossplane_env; then
+        return 1
+    fi
+
+    # 加载镜像
+    local provider_tar=$(find "${IMAGE_DIR}/crossplane" -name "provider-kubernetes*.tar" | head -n 1)
+    log info "加载 provider-kubernetes 镜像: ${provider_tar}"
+    if ! docker load -i "${provider_tar}"; then
+        log error "加载镜像失败"
+        return 1
+    fi
+
+    # 标记并推送镜像
+    log info "标记镜像: ${CROSSPLANE_SOURCE_IMAGE} -> ${CROSSPLANE_TARGET_IMAGE}"
+    if ! docker tag "${CROSSPLANE_SOURCE_IMAGE}" "${CROSSPLANE_TARGET_IMAGE}"; then
+        log error "标记镜像失败"
+        return 1
+    fi
+
+    log info "推送镜像到 Harbor: ${CROSSPLANE_TARGET_IMAGE}"
+    if ! docker push "${CROSSPLANE_TARGET_IMAGE}"; then
+        log error "推送镜像失败"
+        return 1
+    fi
+
+    log info "Crossplane 镜像推送完成"
+    return 0
+}
+## 推送 Crossplane 镜像到 Harbor
+#function push_crossplane_images() {
+#    log info "开始推送 Crossplane 镜像..."
+#
+#    local crossplane_dir="${IMAGE_DIR}/crossplane"
+#    if [ ! -d "${crossplane_dir}" ]; then
+#        log error "Crossplane 镜像目录不存在: ${crossplane_dir}"
+#        return 1
+#    fi
+#
+#    # 查找 provider-kubernetes 镜像文件
+#    local provider_tar=$(find "${crossplane_dir}" -name "provider-kubernetes*.tar" | head -n 1)
+#    if [ -z "${provider_tar}" ]; then
+#        log error "未找到 provider-kubernetes 镜像文件"
+#        return 1
+#    fi
+#
+#    # 提取版本号
+#    local version=$(basename "${provider_tar}" | grep -oP 'v\d+\.\d+\.\d+' || echo "")
+#    if [ -z "${version}" ]; then
+#        log error "无法从文件名提取版本号: ${provider_tar}"
+#        return 1
+#    fi
+#
+#    # 加载镜像
+#    log info "加载 provider-kubernetes 镜像: ${provider_tar}"
+#    if ! docker load -i "${provider_tar}"; then
+#        log error "加载镜像失败"
+#        return 1
+#    fi
+#
+#    # 标记并推送镜像
+#    local source_image="xpkg.upbound.io/upbound/provider-kubernetes:${version}"
+#    local target_image="${CONTAINER_REGISTRY}/library/provider-kubernetes:${version}"
+#
+#    log info "标记镜像: ${source_image} -> ${target_image}"
+#    if ! docker tag "${source_image}" "${target_image}"; then
+#        log error "标记镜像失败"
+#        return 1
+#    fi
+#
+#    log info "推送镜像到 Harbor: ${target_image}"
+#    if ! docker push "${target_image}"; then
+#        log error "推送镜像失败"
+#        return 1
+#    fi
+#
+#    log info "Crossplane 镜像推送完成"
+#    return 0
+#}
+# 安装 Volcano
+function install_volcano() {
+    log info "开始安装 Volcano..."
+
+    # 检查 helm 命令
+    if ! command -v helm &>/dev/null; then
+        log error "未找到 helm 命令"
+        return 1
+    fi
+
+    # 查找 Volcano helm chart
+    local chart_file=$(find "${OTHERS_DIR}" -name "volcano-*.tgz" | head -n 1)
+    if [ -z "${chart_file}" ]; then
+        log error "未找到 Volcano helm chart 文件"
+        return 1
+    fi
+
+    # 提取版本号
+    local version=$(basename "${chart_file}" | grep -oP '\d+\.\d+\.\d+(?=\.tgz)' || echo "")
+    if [ -z "${version}" ]; then
+        log error "无法从文件名提取版本号: ${chart_file}"
+        return 1
+    fi
+
+    log info "使用 Helm 安装 Volcano 版本 ${version}..."
+
+    # 尝试安装
+    if helm install volcano "${chart_file}" \
+        --set basic.image_pull_policy=IfNotPresent \
+        --set basic.image_tag_version=v${version} \
+        --namespace volcano-ljx \
+        --create-namespace; then
+        log info "Volcano 安装成功"
+        return 0
+    fi
+
+    # 如果安装失败,检查是否是因为名称已存在
+    if [[ $(helm list -n volcano-ljx | grep volcano) ]]; then
+        log info "检测到已存在的 Volcano 安装,尝试升级..."
+
+        # 尝试升级
+        if helm upgrade volcano "${chart_file}" \
+            --set basic.image_pull_policy=IfNotPresent \
+            --set basic.image_tag_version=v${version} \
+            --namespace volcano-ljx \
+            --create-namespace; then
+            log info "Volcano 升级成功"
+            return 0
+        else
+            log error "Volcano 升级失败"
+            return 1
+        fi
+    fi
+
+    log error "Volcano 安装失败"
+    return 1
+}
+
+# 安装 Crossplane
+function install_crossplane() {
+    log info "开始安装 Crossplane..."
+
+    # 使用 kubez-ansible 安装 Crossplane
+    log info "通过 kubez-ansible 安装 Crossplane..."
+    if ! ${KUBEZ_ANSIBLE_CMD} apply --tag crossplane; then
+        log error "通过 kubez-ansible 安装 Crossplane 失败"
+#        return 1
+    fi
+    log info "通过 kubez-ansible 安装 Crossplane 完成"
+
+    # 检查 helm 命令是否可用
+    if ! command -v helm &>/dev/null; then
+        log error "未找到 helm 命令"
+        return 1
+    fi
+
+    # 查找 Crossplane helm chart
+    local chart_file=$(find "${OTHERS_DIR}" -name "crossplane-*.tgz" | head -n 1)
+    if [ -z "${chart_file}" ]; then
+        log error "未找到 Crossplane helm chart 文件"
+        return 1
+    fi
+
+    # 提取版本号
+    local version=$(basename "${chart_file}" | grep -oP '\d+\.\d+\.\d+(?=\.tgz)' || echo "")
+    if [ -z "${version}" ]; then
+        log error "无法从文件名提取版本号: ${chart_file}"
+        return 1
+    fi
+
+    # 创建命名空间
+    if ! kubectl get namespace crossplane-system &>/dev/null; then
+        log info "创建 crossplane-system 命名空间"
+        if ! kubectl create namespace crossplane-system; then
+            log error "创建命名空间失败"
+            return 1
+        fi
+    fi
+
+    # 查找 provider-kubernetes 版本
+    if ! set_crossplane_env; then
+        return 1
+    fi
+
+    # 安装 Crossplane
+    log info "使用 Helm 安装 Crossplane ${version}"
+    if ! helm install crossplane "${chart_file}" \
+        --namespace crossplane-system \
+        --set args='{--enable-external-secret-stores}' \
+        --set image.tag="v${version}" \
+        --set "provider.packages={${CROSSPLANE_TARGET_IMAGE}}"; then
+        if [[ $(helm list -n crossplane-system | grep crossplane) ]]; then
+            log info "检测到已存在的 Crossplane 安装,尝试升级..."
+
+            # 尝试升级
+            if ! helm upgrade crossplane "${chart_file}" \
+                --namespace crossplane-system \
+                --set "provider.packages={${CROSSPLANE_TARGET_IMAGE}}"; then
+                log error "Crossplane 升级失败"
+                return 1
+            fi
+        else
+            log error "Crossplane 安装失败"
+            return 1
+        fi
+    fi
+
+    # 等待 Crossplane 就绪
+    log info "等待 Crossplane 就绪..."
+    local max_retries=30
+    local retry_count=0
+    while [ $retry_count -lt $max_retries ]; do
+        if kubectl -n crossplane-system get pods | grep -q "crossplane.*Running"; then
+            log info "Crossplane 已就绪"
+            return 0
+        fi
+        retry_count=$((retry_count + 1))
+        sleep 10
+    done
+
+    log error "等待 Crossplane 就绪超时"
+    return 1
+}
 
 # 修改 main 函数中的安装分支
 function main() {
     case "$1" in
+        "test")  
+            if [ -z "$2" ]; then
+                log error "请指定要测试的函数名"
+                show_help
+                exit 1
+            fi
+            init_env
+            shift
+            test_function "$@"
+            ;;
         "install")
             if [ -z "$2" ]; then
                 log error "请指定安装选项"
@@ -1748,6 +2259,9 @@ function main() {
                     wait_kubernetes_ready
                     install_monitoring
                     install_harbor
+                    push_crossplane_images
+                    install_crossplane
+                    install_volcano
                     install_uni_virt
                     log info "所有组件安装完成！"
                     kubectl get pods -A
@@ -1778,6 +2292,31 @@ function main() {
                     check_prerequisites "univirt" || { log error "UniVirt 安装前检查失败"; exit 1; }
                     install_uni_virt
                     log info "UniVirt 安装完成"
+                    ;;
+
+                "crossplane")
+                    log info "开始安装 Crossplane..."
+                    init_env
+                    check_prerequisites "crossplane" || { log error "Crossplane 安装前检查失败"; exit 1; }
+                    push_crossplane_images
+                    install_crossplane
+                    log info "Crossplane 安装完成"
+                    ;;
+                "volcano")
+                    log info "开始安装 Volcano..."
+                    init_env
+                    check_prerequisites "volcano" || { log error "Volcano 安装前检查失败"; exit 1; }
+                    install_volcano
+                    log info "Volcano 安装完成"
+                    ;;
+                
+                "check_and_upload")
+                    log info "开始检查文件并上传镜像和RPM包..."
+                    init_env
+                    check_files true     # 检查所有文件
+                    install_nexus        # 安装并启动Nexus
+                    process_materials    # 处理材料（解压并上传镜像和RPM包）
+                    log info "文件检查和上传完成"
                     ;;
                     
                 *)
@@ -1819,33 +2358,100 @@ function check_kubernetes_ready() {
     return 0
 }
 
-# 添加安装选项验证函数
-function validate_install_option() {
-    local option="$1"
-    local valid_options=("all" "harbor" "monitoring" "univirt")
+# 添加 Kube-OVN 卸载函数
+function uninstall_kube_ovn() {
+    log info "开始卸载 Kube-OVN..."
     
-    for valid_option in "${valid_options[@]}"; do
-        if [ "$option" = "$valid_option" ]; then
-            return 0
+    # 检查 kubectl 命令是否可用
+    if ! command -v kubectl &>/dev/null; then
+        log warning "kubectl 命令不可用，跳过 Kube-OVN 资源清理"
+        return 0
+    fi
+    
+    # 检查 Kubernetes 集群是否可访问
+    if ! kubectl get nodes &>/dev/null; then
+        log warning "无法访问 Kubernetes 集群，跳过 Kube-OVN 资源清理"
+        return 0
+    fi
+    
+    # 检查清理脚本是否存在
+    if [ -f "${OTHERS_DIR}/cleanup.sh" ]; then
+        log info "执行 Kube-OVN 清理脚本..."
+        
+        # 执行清理脚本，即使失败也继续执行
+        if bash "${OTHERS_DIR}/cleanup.sh"; then
+            log info "Kube-OVN 清理脚本执行成功"
+        else
+            log warning "Kube-OVN 清理脚本执行失败，但将继续执行后续清理步骤"
         fi
-    done
+    else
+        log warning "Kube-OVN 清理脚本不存在: ${OTHERS_DIR}/cleanup.sh"
+        
+        # 尝试使用 kubectl 手动清理 Kube-OVN 资源
+        log info "尝试手动清理 Kube-OVN 资源..."
+        
+        # 删除 Kube-OVN 相关命名空间和资源
+        kubectl delete ns kube-ovn &>/dev/null || true
+        kubectl delete crd ips.kubeovn.io networks.kubeovn.io subnets.kubeovn.io &>/dev/null || true
+        kubectl delete ds kube-ovn-cni -n kube-system &>/dev/null || true
+        kubectl delete deployment ovn-central kube-ovn-controller -n kube-system &>/dev/null || true
+    fi
     
-    log error "无效的安装选项: $option"
-    echo "有效的安装选项包括: ${valid_options[*]}"
-    return 1
+    # 在所有节点上清理 Kube-OVN 相关文件和目录
+    log info "清理 Kube-OVN 相关文件和目录..."
+    
+    # 使用 ansible 在所有节点上执行清理命令
+    ansible -i "${INVENTORY}" all -m shell -a "
+        rm -rf /var/run/openvswitch /var/run/ovn /etc/origin/openvswitch/ /etc/origin/ovn/ /etc/cni/net.d/00-kube-ovn.conflist /etc/cni/net.d/01-kube-ovn.conflist /var/log/openvswitch /var/log/ovn /var/log/kube-ovn 2>/dev/null || true
+    " || log warning "清理 Kube-OVN 文件和目录失败，但将继续执行"
+    
+    log info "Kube-OVN 卸载完成"
+    return 0
 }
 
-# 在 main 函数调用前添加参数验证
-if [ "$1" = "install" ]; then
-    if [ -z "$2" ]; then
-        log error "请指定安装选项"
-        show_help
-        exit 1
-    fi
-    validate_install_option "$2" || exit 1
-fi
+# 修改 destroy_kubernetes 函数，在卸载 Kubernetes 前先卸载 Kube-OVN
+function destroy_kubernetes() {
+    log info "开始卸载 Kubernetes 集群，inventory: $INVENTORY"
+    
+    # 先卸载 Kube-OVN
+    uninstall_kube_ovn
+    
+    # 然后卸载 Kubernetes 集群
+    ${KUBEZ_ANSIBLE_CMD} destroy --yes-i-really-really-mean-it || { 
+        log error "卸载 Kubernetes 集群失败"; 
+        exit 1; 
+    }
+    log info "Kubernetes 集群卸载完成"
+}
+
+# 添加安装选项验证函数
+#function validate_install_option() {
+#    local option="$1"
+#    local valid_options=("all" "harbor" "monitoring" "univirt" "check_and_upload" "test" "crossplane" "volcano")
+#
+#    for valid_option in "${valid_options[@]}"; do
+#        if [ "$option" = "$valid_option" ]; then
+#            return 0
+#        fi
+#    done
+#
+#    log error "无效的安装选项: $option"
+#    echo "有效的安装选项包括: ${valid_options[*]}"
+#    return 1
+#}
+#
+## 在 main 函数调用前添加参数验证
+#if [ "$1" = "install" ]; then
+#    if [ -z "$2" ]; then
+#        log error "请指定安装选项"
+#        show_help
+#        exit 1
+#    fi
+#    validate_install_option "$2" || exit 1
+#fi
 
 # 执行主程序
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
     main "$@"
 fi
+
