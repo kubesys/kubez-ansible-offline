@@ -2792,7 +2792,7 @@ function main() {
                     log info "开始完整安装..."
                     init_env
                     check_ports_availability
-#                    check_files true     # 检查所有文件
+                    check_files true     # 检查所有文件
                     cleanup_old_data
                     install_nexus
                     process_materials
