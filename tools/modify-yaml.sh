@@ -50,7 +50,13 @@ function generate_output_filename() {
     local input_ext="${input_basename##*.}"
     local timestamp=$(date '+%Y%m%d%H%M%S')
 
-    local output_filename="${input_name}-modified-${namespace}-${timestamp}.${input_ext}"
+#    if [[ -n "$namespace" ]]; then
+#        local output_filename="${input_name}-modified-${namespace}-${timestamp}.${input_ext}"
+#    else
+#        local output_filename="${input_name}-modified-${timestamp}.${input_ext}"
+#    fi
+    local output_filename="${input_name}-${timestamp}.${input_ext}"
+
     local output_path="${input_dir}/${output_filename}"
 
     echo "$output_path"
@@ -63,8 +69,8 @@ function show_help() {
     echo "选项:"
     echo "  -i, --input FILE           输入的原始 YAML 文件路径 (必需)"
     echo "  -o, --output FILE          输出的修改后 YAML 文件路径 (可选，自动生成)"
-    echo "  -n, --namespace NAME       目标命名空间 (默认: volcano-monitoring)"
-    echo "  -r, --pull-policy POLICY  镜像拉取策略 (默认: IfNotPresent)"
+    echo "  -n, --namespace NAME       目标命名空间 (可选，不设置则不修改命名空间)"
+    echo "  -r, --pull-policy POLICY  镜像拉取策略 (可选，不设置则不修改策略)"
     echo "  --<container>-img IMAGE    指定容器镜像，支持以下格式:"
     echo "                             - library/image (只修改镜像名，保持原版本)"
     echo "                             - library/image:version (修改镜像名和版本)"
@@ -79,13 +85,20 @@ function show_help() {
     echo "  - 支持任意容器名称，不限于预定义列表"
     echo "  - 参数优先级: --image > --<container>-ver > --<container>-img"
     echo "  - 如果只提供 --<container>-ver，会查找 YAML 中对应容器的镜像名进行版本替换"
+    echo "  - 命名空间和镜像拉取策略都是可选的，不设置则不修改"
     echo ""
     echo "示例:"
-    echo "  # 只修改镜像名，保持原版本"
+    echo "  # 只修改镜像，不改命名空间和拉取策略"
     echo "  $0 -i input.yaml --prometheus-img prom/prometheus"
     echo ""
     echo "  # 修改镜像名和版本"
     echo "  $0 -i input.yaml --prometheus-img prom/prometheus:v2.50.0"
+    echo ""
+    echo "  # 同时修改命名空间和镜像"
+    echo "  $0 -i input.yaml -n my-namespace --prometheus-img prom/prometheus:v2.50.0"
+    echo ""
+    echo "  # 只修改拉取策略"
+    echo "  $0 -i input.yaml -r Always"
     echo ""
     echo "  # 先设置镜像，再用版本参数覆盖版本"
     echo "  $0 -i input.yaml --prometheus-img prom/prometheus:v2.45.0 --prometheus-ver v2.50.0"
@@ -97,7 +110,7 @@ function show_help() {
     echo "  $0 -i input.yaml --image prometheus=prom/prometheus:v2.50.0"
     echo ""
     echo "  # 混合使用多种参数"
-    echo "  $0 -i input.yaml \\"
+    echo "  $0 -i input.yaml -n production -r IfNotPresent \\"
     echo "     --prometheus-img prom/prometheus:v2.45.0 --prometheus-ver v2.50.0 \\"
     echo "     --grafana-ver 10.0.0 \\"
     echo "     --image alertmanager=prom/alertmanager:v0.25.0"
@@ -317,8 +330,8 @@ function modify_volcano_monitoring_yaml() {
         fi
     done
 
-    if [[ -z "$input_file" || -z "$namespace" || -z "$image_pull_policy" ]]; then
-        log error "缺少必需参数"
+    if [[ -z "$input_file" ]]; then
+        log error "缺少输入文件参数"
         show_help
         return 1
     fi
@@ -326,6 +339,23 @@ function modify_volcano_monitoring_yaml() {
     if [[ ! -f "$input_file" ]]; then
         log error "输入文件不存在: $input_file"
         return 1
+    fi
+
+    # 检查是否有任何修改需要执行
+    local has_changes=0
+    if [[ -n "$namespace" ]]; then
+        has_changes=1
+    fi
+    if [[ -n "$image_pull_policy" ]]; then
+        has_changes=1
+    fi
+    if [[ ${#final_images[@]} -gt 0 ]]; then
+        has_changes=1
+    fi
+
+    if [[ $has_changes -eq 0 ]]; then
+        log warning "没有指定任何修改操作（命名空间、镜像拉取策略或容器镜像）"
+        log info "将创建原文件的副本"
     fi
 
     if [[ -z "$output_file" ]]; then
@@ -336,11 +366,21 @@ function modify_volcano_monitoring_yaml() {
     log info "开始修改 YAML 文件..."
     log info "输入文件: $input_file"
     log info "输出文件: $output_file"
-    log info "目标命名空间: $namespace"
-    log info "镜像拉取策略: $image_pull_policy"
+
+    if [[ -n "$namespace" ]]; then
+        log info "目标命名空间: $namespace"
+    else
+        log info "命名空间: 不修改"
+    fi
+
+    if [[ -n "$image_pull_policy" ]]; then
+        log info "镜像拉取策略: $image_pull_policy"
+    else
+        log info "镜像拉取策略: 不修改"
+    fi
 
     if [[ ${#final_images[@]} -eq 0 ]]; then
-        log warning "没有指定任何容器镜像修改"
+        log info "容器镜像: 不修改"
     else
         log info "=== 最终镜像修改列表 ==="
         for container in "${!final_images[@]}"; do
@@ -349,27 +389,32 @@ function modify_volcano_monitoring_yaml() {
         log info "=========================="
     fi
 
-    local old_namespace=$(grep -m 1 -E "^\s*namespace:\s*" "$input_file" | awk '{print $2}')
-    if [[ -z "$old_namespace" ]]; then
-        log warning "无法从 YAML 中自动检测到旧的 namespace"
+    local old_namespace=""
+    if [[ -n "$namespace" ]]; then
+        old_namespace=$(grep -m 1 -E "^\s*namespace:\s*" "$input_file" | awk '{print $2}')
+        if [[ -z "$old_namespace" ]]; then
+            log warning "无法从 YAML 中自动检测到旧的 namespace"
+        fi
+        log info "检测到旧 namespace: ${old_namespace:-'未检测到'}"
     fi
-    log info "检测到旧 namespace: ${old_namespace:-'未检测到'}"
 
-    # 构建AWK脚本用于镜像替换
+    # 构建AWK脚本
     local awk_script='
     BEGIN {
         insert_policy_after_this_line = 0
         indent_for_policy = ""
         current_container = ""
+        modify_namespace = (ENVIRON["new_ns"] != "")
+        modify_pull_policy = (ENVIRON["pull_policy"] != "")
     }
     {
-        # 1. 替换 metadata.namespace
-        if ($0 ~ /^[[:space:]]*namespace:[[:space:]]*/) {
+        # 1. 替换 metadata.namespace (仅当设置了新namespace时)
+        if (modify_namespace && $0 ~ /^[[:space:]]*namespace:[[:space:]]*/) {
             sub(/:.*/, ": " ENVIRON["new_ns"], $0)
         }
 
-        # 2. 全局替换硬编码的旧命名空间字符串
-        if (ENVIRON["old_ns"] != "") {
+        # 2. 全局替换硬编码的旧命名空间字符串 (仅当设置了新namespace时)
+        if (modify_namespace && ENVIRON["old_ns"] != "") {
             gsub(ENVIRON["old_ns"], ENVIRON["new_ns"], $0)
         }
 
@@ -392,13 +437,22 @@ function modify_volcano_monitoring_yaml() {
             if (ENVIRON[env_var] != "") {
                 sub(/image:[[:space:]]*[^[:space:]]*/, "image: " ENVIRON[env_var], $0)
                 print $0
-                # 标记需要处理 imagePullPolicy
-                insert_policy_after_this_line = 1
+                # 标记需要处理 imagePullPolicy (仅当设置了拉取策略时)
+                if (modify_pull_policy) {
+                    insert_policy_after_this_line = 1
+                }
+                next
+            } else {
+                print $0
+                # 即使没有修改镜像，如果设置了拉取策略，也可能需要添加/修改策略
+                if (modify_pull_policy) {
+                    insert_policy_after_this_line = 1
+                }
                 next
             }
         }
 
-        # 5. 修改或添加 imagePullPolicy
+        # 5. 修改或添加 imagePullPolicy (仅当设置了拉取策略时)
         if (insert_policy_after_this_line == 1) {
             if ($0 ~ /^[[:space:]]*imagePullPolicy:[[:space:]]*/) {
                 # 如果当前行是 imagePullPolicy，则修改它
@@ -442,8 +496,8 @@ function modify_volcano_monitoring_yaml() {
 function main() {
     local input_file=""
     local output_file=""
-    local namespace="volcano-monitoring"
-    local image_pull_policy="IfNotPresent"
+    local namespace=""
+    local image_pull_policy=""
     local image_args=()
 
     while [[ $# -gt 0 ]]; do
