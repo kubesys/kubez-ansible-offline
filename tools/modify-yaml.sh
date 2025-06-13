@@ -152,40 +152,125 @@ function extract_existing_images() {
 
     # 使用awk提取所有image行及其上下文
     local awk_extract='
-    {
-        # 查找image行
-        if ($0 ~ /^[[:space:]]*image:[[:space:]]*/) {
-            # 提取镜像名称
-            match($0, /image:[[:space:]]*([^[:space:]]+)/, arr)
-            if (arr[1]) {
-                images[NR] = arr[1]
-            }
-        }
-        # 查找容器名称（在image行之前）
-        if ($0 ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ || $0 ~ /^[[:space:]]*name:[[:space:]]*/) {
-            match($0, /name:[[:space:]]*([^[:space:]]+)/, arr)
-            if (arr[1]) {
-                container_names[NR] = arr[1]
-            }
-        }
+    BEGIN {
+        in_containers = 0
+        current_name = ""
+        current_image = ""
+        item_content_indent_level = -1 # Expected indent level for lines within a container item
     }
-    END {
-        # 匹配容器名和镜像
-        for (img_line in images) {
-            closest_name_line = 0
-            closest_name = ""
-            # 查找最近的容器名
-            for (name_line in container_names) {
-                if (name_line < img_line && name_line > closest_name_line) {
-                    closest_name_line = name_line
-                    closest_name = container_names[name_line]
+
+    # Detect "containers:" block
+    /^[[:space:]]*containers:[[:space:]]*$/ {
+        in_containers = 1
+        current_name = ""
+        current_image = ""
+        item_content_indent_level = -1
+        next
+    }
+
+    # Detect end of "containers:" block (e.g., a new key not indented further, or "---")
+    in_containers && (!/^[[:space:]]+.*/ || $0 ~ /^---/) {
+        if (current_name != "" && current_image != "") {
+            print current_name "=" current_image
+        }
+        in_containers = 0
+        current_name = ""
+        current_image = ""
+        item_content_indent_level = -1
+        # If line is "---", awk handles it. If other non-indented line, it is processed after this block.
+    }
+
+    in_containers {
+        # Current line being processed
+        line = $0
+
+        # Check for the start of a new container item: line starts with "- "
+        if (match(line, /^[[:space:]]*-[[:space:]]/)) {
+            # Output previously collected items data
+            if (current_name != "" && current_image != "") {
+                print current_name "=" current_image
+            }
+            # Reset for the new item
+            current_name = ""
+            current_image = ""
+
+            # Determine the expected indent level for content lines of this item.
+            # It is the indent of the line itself, plus the length of "- ", plus indent of actual content.
+            match(line, /^([[:space:]]*-[[:space:]]+)/) # Matches literal "- " and its leading spaces
+            prefix_len = RLENGTH
+
+            temp_item_line = substr(line, prefix_len + 1) # Get content after "- "
+            match(temp_item_line, /^([[:space:]]*)縈/) # Find leading spaces of content
+            content_indent_len = RLENGTH
+            item_content_indent_level = prefix_len + content_indent_len
+
+            # Check if name or image is on this first line of the item
+            if (match(line, /name:[[:space:]]*([^[:space:]]+)/)) {
+                # RSTART and RLENGTH are for the whole regex match "name: value"
+                # We need the captured group. For POSIX, extract the value part.
+                name_val_substr = substr(line, RSTART) # Substring from "name:"
+                if (match(name_val_substr, /:[[:space:]]*([^[:space:]]+)/)) { # Match ": value"
+                     current_name = substr(name_val_substr, RSTART + 1, RLENGTH -1) # Get value, +1 to skip ":"
+                     # Trim leading space if any from value itself if regex allows it like `:[[:space:]]*`
+                     sub(/^[[:space:]]+/, "", current_name)
                 }
             }
-            if (closest_name != "") {
-                print closest_name "=" images[img_line]
+            if (match(line, /image:[[:space:]]*([^[:space:]]+)/)) {
+                image_val_substr = substr(line, RSTART)
+                if (match(image_val_substr, /:[[:space:]]*([^[:space:]]+)/)) {
+                    current_image = substr(image_val_substr, RSTART + 1, RLENGTH - 1)
+                    sub(/^[[:space:]]+/, "", current_image)
+                }
+            }
+        } else if (item_content_indent_level != -1) { # Subsequent line of a container item
+            match(line, /^([[:space:]]*)/)
+            current_line_actual_indent = RLENGTH
+
+            # Check if this line is indented as part of the current items content
+            if (current_line_actual_indent >= item_content_indent_level) {
+                 if (current_name == "" && match(line, /name:[[:space:]]*([^[:space:]]+)/)) {
+                    name_val_substr = substr(line, RSTART)
+                    if (match(name_val_substr, /:[[:space:]]*([^[:space:]]+)/)) {
+                        current_name = substr(name_val_substr, RSTART + 1, RLENGTH - 1)
+                        sub(/^[[:space:]]+/, "", current_name)
+                    }
+                }
+                if (current_image == "" && match(line, /image:[[:space:]]*([^[:space:]]+)/)) {
+                    image_val_substr = substr(line, RSTART)
+                    if (match(image_val_substr, /:[[:space:]]*([^[:space:]]+)/)) {
+                        current_image = substr(image_val_substr, RSTART + 1, RLENGTH - 1)
+                        sub(/^[[:space:]]+/, "", current_image)
+                    }
+                }
+            } else { # Line is less indented than current items content, so current item effectively ends.
+                if (current_name != "" && current_image != "") {
+                     print current_name "=" current_image
+                }
+                current_name = ""
+                current_image = ""
+                item_content_indent_level = -1
+                # This line will be re-evaluated in the next awk cycle against all rules.
+                # To prevent it from being consumed by next at the end of in_containers block,
+                # we should not use next if we want this line to be reprocessed.
+                # However, the current structure with next at the end of in_containers means
+                # this line will be consumed. For this specific logic, it is okay,
+                # as a less-indented line correctly signifies end of current item.
             }
         }
-    }'
+        next # Consume lines processed by in_containers logic
+    }
+
+    # Lines not consumed by in_containers logic (e.g. before containers: or after block ends)
+    # are implicitly printed if there was a `print $0` here, or just processed by other rules.
+    # This functions specific job is extraction, so no default print $0.
+
+    END {
+        # After all lines processed, if there is a pending item, print it.
+        if (current_name != "" && current_image != "") {
+            print current_name "=" current_image
+        }
+    }
+'
 
     # 执行提取并解析结果
     local extraction_result=$(awk "$awk_extract" "$input_file")
@@ -403,71 +488,194 @@ function modify_volcano_monitoring_yaml() {
     BEGIN {
         insert_policy_after_this_line = 0
         indent_for_policy = ""
-        current_container = ""
         modify_namespace = (ENVIRON["new_ns"] != "")
         modify_pull_policy = (ENVIRON["pull_policy"] != "")
+
+        # Variables for handling container items
+        in_containers_block = 0
+        current_item_lines = "" # Buffer for lines of the current container item
+        current_item_name = ""
+        current_item_image_line = ""
+        current_item_image_original = ""
+        current_item_image_indent = ""
+        item_start_indent_level = -1 # Indent level of the line starting with "- "
     }
     {
-        # 1. 替换 metadata.namespace (仅当设置了新namespace时)
-        if (modify_namespace && $0 ~ /^[[:space:]]*namespace:[[:space:]]*/) {
-            sub(/:.*/, ": " ENVIRON["new_ns"], $0)
-        }
-
-        # 2. 全局替换硬编码的旧命名空间字符串 (仅当设置了新namespace时)
-        if (modify_namespace && ENVIRON["old_ns"] != "") {
-            gsub(ENVIRON["old_ns"], ENVIRON["new_ns"], $0)
-        }
-
-        # 3. 检测当前容器名
-        if ($0 ~ /^[[:space:]]*-[[:space:]]*name:[[:space:]]*/ || $0 ~ /^[[:space:]]*name:[[:space:]]*/) {
-            match($0, /name:[[:space:]]*([^[:space:]]+)/, arr)
-            if (arr[1]) {
-                current_container = arr[1]
-                gsub(/-/, "_", current_container)
+        # Handle namespace modifications (these are global or metadata-level)
+        if (modify_namespace) {
+            if ($0 ~ /^[[:space:]]*namespace:[[:space:]]*/) {
+                sub(/:.*/, ": " ENVIRON["new_ns"], $0)
+            }
+            if (ENVIRON["old_ns"] != "") {
+                gsub(ENVIRON["old_ns"], ENVIRON["new_ns"], $0)
             }
         }
 
-        # 4. 替换镜像
-        if ($0 ~ /^[[:space:]]*image:[[:space:]]*/) {
-            match($0, /^([[:space:]]*)/)
-            indent_for_policy = substr($0, 1, RLENGTH)
-
-            # 检查当前容器是否需要替换镜像
-            env_var = current_container "_final_img"
-            if (ENVIRON[env_var] != "") {
-                sub(/image:[[:space:]]*[^[:space:]]*/, "image: " ENVIRON[env_var], $0)
-                print $0
-                # 标记需要处理 imagePullPolicy (仅当设置了拉取策略时)
-                if (modify_pull_policy) {
-                    insert_policy_after_this_line = 1
-                }
-                next
-            } else {
-                print $0
-                # 即使没有修改镜像，如果设置了拉取策略，也可能需要添加/修改策略
-                if (modify_pull_policy) {
-                    insert_policy_after_this_line = 1
-                }
-                next
-            }
-        }
-
-        # 5. 修改或添加 imagePullPolicy (仅当设置了拉取策略时)
-        if (insert_policy_after_this_line == 1) {
-            if ($0 ~ /^[[:space:]]*imagePullPolicy:[[:space:]]*/) {
-                # 如果当前行是 imagePullPolicy，则修改它
-                print indent_for_policy "imagePullPolicy: " ENVIRON["pull_policy"]
-            } else {
-                # 否则，插入新的 imagePullPolicy，然后打印当前行
-                print indent_for_policy "imagePullPolicy: " ENVIRON["pull_policy"]
-                print $0
-            }
-            insert_policy_after_this_line = 0
+        # Detect entering/leaving containers block
+        if (/^[[:space:]]*containers:[[:space:]]*$/) {
+            in_containers_block = 1
+            print $0
             next
         }
+        # Heuristic for exiting containers block: line not indented under spec/template/jobTemplate or new top-level key
+        if (in_containers_block && (!/^[[:space:]]+.*/ || $0 ~ /^---/)) {
+            # Process any pending container item before exiting
+            if (item_start_indent_level != -1) {
+                process_pending_container_item()
+            }
+            in_containers_block = 0
+            # Fall through to print current line if it is not "---"
+        }
 
+        if (in_containers_block) {
+            match($0, /^([[:space:]]*)-[[:space:]]/);
+            # Restore original logic for line_starts_with_dash_at_indent
+            if (RLENGTH > 0) {
+                line_starts_with_dash_at_indent = length(substr($0,1,RLENGTH-1));
+            } else {
+                line_starts_with_dash_at_indent = -1;
+            }
+
+            # Restructure the if/else if/else
+            processed_current_line = 0;
+
+            if (line_starts_with_dash_at_indent != -1) {
+                if (item_start_indent_level != -1) {
+                    process_pending_container_item();
+                }
+                item_start_indent_level = line_starts_with_dash_at_indent;
+                current_item_lines = $0 "\n";
+                extract_name_image_from_line($0);
+                processed_current_line = 1;
+            }
+
+            if (processed_current_line == 0 && item_start_indent_level != -1) { # Equivalent to else if
+                match($0, /^([[:space:]]*)/);
+                current_line_indent = RLENGTH;
+                if (current_line_indent > item_start_indent_level || ($0 ~ /imagePullPolicy:/ && current_item_image_line != "")) {
+                    current_item_lines = current_item_lines $0 "\n";
+                    extract_name_image_from_line($0);
+                } else {
+                    process_pending_container_item();
+                    print $0;
+                }
+                processed_current_line = 1;
+            }
+
+            if (processed_current_line == 0) { # Equivalent to else
+                print $0;
+            }
+            next;
+        }
+
+        # Default print for lines not handled by above logic (e.g. outside containers block)
         print $0
-    }'
+    }
+    END {
+        # Process any final pending container item
+        if (item_start_indent_level != -1) {
+            process_pending_container_item()
+        }
+    }
+
+    # Helper function to extract name and image from a line
+    function extract_name_image_from_line(line) {
+        # For name
+        temp_line_for_name = line
+        # Try to match and extract name. Regex: find "name:" then capture non-space chars.
+        if (sub(/.*name:[[:space:]]*/, "", temp_line_for_name)) { # Remove everything up to "name: "
+            sub(/[[:space:]].*/, "", temp_line_for_name) # Remove everything after the name value
+            if (current_item_name == "") current_item_name = temp_line_for_name
+        }
+
+        # For image
+        temp_line_for_image = line
+        # Try to match and extract image. Regex: find "image:" then capture non-space chars.
+        if (sub(/.*image:[[:space:]]*/, "", temp_line_for_image)) { # Remove everything up to "image: "
+            sub(/[[:space:]].*/, "", temp_line_for_image) # Remove everything after the image value
+            if (current_item_image_line == "") {
+                current_item_image_line = line # Store the original full line
+                current_item_image_original = temp_line_for_image # Store the extracted image value
+
+                # Get indent for image line
+                match(line, /^([[:space:]]*)/) # This match is fine, it sets RSTART/RLENGTH
+                current_item_image_indent = substr(line, 1, RLENGTH)
+            }
+        }
+    }
+
+    # Helper function to process the buffered container item
+    function process_pending_container_item() {
+        if (current_item_name == "" && current_item_image_line == "") { # Nothing to process
+            printf "%s", current_item_lines; # Print whatever was buffered (e.g. comments)
+            reset_item_state();
+            return;
+        }
+
+        effective_container_name_for_lookup = current_item_name
+        gsub(/-/, "_", effective_container_name_for_lookup) # Normalize name for env var lookup
+
+        final_image_to_use = ""
+        if (effective_container_name_for_lookup != "" && ENVIRON[effective_container_name_for_lookup "_final_img"] != "") {
+            final_image_to_use = ENVIRON[effective_container_name_for_lookup "_final_img"]
+        }
+
+        # Reconstruct and print the items lines
+        split(current_item_lines, lines_array, "\n") # Corrected from item_lines to current_item_lines
+        item_image_line_modified = 0
+        image_line_printed_with_policy = 0
+
+        for (i = 1; i < length(lines_array); i++) {
+            line_to_print = lines_array[i]
+            is_image_line = (lines_array[i] == current_item_image_line && current_item_image_line != "")
+
+            if (is_image_line) {
+                if (final_image_to_use != "") {
+                    sub(current_item_image_original, final_image_to_use, line_to_print)
+                }
+                print line_to_print
+                item_image_line_modified = (final_image_to_use != "" && final_image_to_use != current_item_image_original)
+
+                if (modify_pull_policy) {
+                    # Check if next line is pull policy
+                    next_line_is_policy = ( (i+1) < length(lines_array) && lines_array[i+1] ~ /[[:space:]]*imagePullPolicy:[[:space:]]*/)
+                    if (!next_line_is_policy) {
+                        print current_item_image_indent "imagePullPolicy: " ENVIRON["pull_policy"]
+                    }
+                    # if next line IS policy, it will be handled in the next iteration
+                }
+                image_line_printed_with_policy = 1 # Mark that logic for policy insertion around image line is done
+            } else if (modify_pull_policy && lines_array[i] ~ /[[:space:]]*imagePullPolicy:[[:space:]]*/) {
+                # This line is an existing imagePullPolicy
+                # If it followed our processed image line, or if no specific image line was targeted but we need to change policy
+                if (image_line_printed_with_policy || current_item_image_line == "") {
+                     print current_item_image_indent "imagePullPolicy: " ENVIRON["pull_policy"]
+                } else {
+                     print line_to_print # Print existing policy if it is not related to the image we processed
+                }
+            } else {
+                print line_to_print
+            }
+        }
+
+        # If no image line was found in item, but we need to add pull policy (e.g. for safety, though unusual)
+        if (modify_pull_policy && current_item_image_line == "" && item_start_indent_level != -1) {
+             # This case is tricky: where to add it if no image line?
+             # For now, assume policy is only added/modified if an image line exists or policy itself exists.
+        }
+
+        reset_item_state()
+    }
+
+    function reset_item_state() {
+        current_item_lines = ""
+        current_item_name = ""
+        current_item_image_line = ""
+        current_item_image_original = ""
+        current_item_image_indent = ""
+        item_start_indent_level = -1 # Crucial to reset
+    }
+'
 
     log info "执行 YAML 修改..."
 
